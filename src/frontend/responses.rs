@@ -34,7 +34,13 @@ pub type ToolMap = HashMap<String, ToolInfo>;
 pub fn safe_tool_name(name: &str) -> String {
     let clean: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if !clean.is_empty() && clean.len() <= 64 && clean == name {
         return clean;
@@ -47,7 +53,9 @@ pub fn safe_tool_name(name: &str) -> String {
 /// Flatten a namespaced tool into one canonical name.
 pub fn flatten_name(namespace: Option<&str>, name: &str) -> String {
     match namespace {
-        Some(ns) if !ns.is_empty() && !name.starts_with(ns) => safe_tool_name(&format!("{ns}__{name}")),
+        Some(ns) if !ns.is_empty() && !name.starts_with(ns) => {
+            safe_tool_name(&format!("{ns}__{name}"))
+        }
         _ => safe_tool_name(name),
     }
 }
@@ -56,9 +64,14 @@ fn convert_tools(tools: &[Value], map: &mut ToolMap, ns: Option<&str>, out: &mut
     for t in tools {
         match t.get("type").and_then(Value::as_str).unwrap_or("") {
             "function" => {
-                let Some(name) = t.get("name").and_then(Value::as_str) else { continue };
+                let Some(name) = t.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
                 let canon = flatten_name(ns, name);
-                let mut schema = t.get("parameters").cloned().unwrap_or(json!({"type": "object", "properties": {}}));
+                let mut schema = t
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(json!({"type": "object", "properties": {}}));
                 if schema.is_null() {
                     schema = json!({"type": "object", "properties": {}});
                 }
@@ -67,7 +80,14 @@ fn convert_tools(tools: &[Value], map: &mut ToolMap, ns: Option<&str>, out: &mut
                     "description": t.get("description").cloned().unwrap_or(json!("")),
                     "input_schema": schema
                 }));
-                map.insert(canon, ToolInfo { kind: ToolKind::Function, namespace: ns.map(str::to_string), name: name.to_string() });
+                map.insert(
+                    canon,
+                    ToolInfo {
+                        kind: ToolKind::Function,
+                        namespace: ns.map(str::to_string),
+                        name: name.to_string(),
+                    },
+                );
             }
             "namespace" => {
                 let inner_ns = t.get("name").and_then(Value::as_str);
@@ -76,9 +96,15 @@ fn convert_tools(tools: &[Value], map: &mut ToolMap, ns: Option<&str>, out: &mut
                 }
             }
             "custom" => {
-                let Some(name) = t.get("name").and_then(Value::as_str) else { continue };
+                let Some(name) = t.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
                 let canon = flatten_name(ns, name);
-                let mut desc = t.get("description").and_then(Value::as_str).unwrap_or("").to_string();
+                let mut desc = t
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 if let Some(def) = t.pointer("/format/definition").and_then(Value::as_str) {
                     desc.push_str("\n\nPass the raw tool input as the `input` string. It must follow this grammar:\n");
                     desc.push_str(def);
@@ -94,7 +120,14 @@ fn convert_tools(tools: &[Value], map: &mut ToolMap, ns: Option<&str>, out: &mut
                         "required": ["input"]
                     }
                 }));
-                map.insert(canon, ToolInfo { kind: ToolKind::Custom, namespace: ns.map(str::to_string), name: name.to_string() });
+                map.insert(
+                    canon,
+                    ToolInfo {
+                        kind: ToolKind::Custom,
+                        namespace: ns.map(str::to_string),
+                        name: name.to_string(),
+                    },
+                );
             }
             "local_shell" => {
                 out.push(json!({
@@ -110,7 +143,14 @@ fn convert_tools(tools: &[Value], map: &mut ToolMap, ns: Option<&str>, out: &mut
                         "required": ["command"]
                     }
                 }));
-                map.insert("local_shell".into(), ToolInfo { kind: ToolKind::LocalShell, namespace: None, name: "local_shell".into() });
+                map.insert(
+                    "local_shell".into(),
+                    ToolInfo {
+                        kind: ToolKind::LocalShell,
+                        namespace: None,
+                        name: "local_shell".into(),
+                    },
+                );
             }
             // Hosted tools (web_search, file_search, image_generation, ...)
             // only exist on OpenAI's servers.
@@ -128,7 +168,9 @@ fn parse_data_url(url: &str) -> Option<(String, String)> {
 
 fn image_block(url: &str) -> Value {
     match parse_data_url(url) {
-        Some((media, data)) => json!({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}}),
+        Some((media, data)) => {
+            json!({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}})
+        }
         None => json!({"type": "image", "source": {"type": "url", "url": url}}),
     }
 }
@@ -169,21 +211,21 @@ fn output_to_content(output: &Value) -> Value {
 /// Convert a Responses request into a canonical request.
 pub fn convert_request(body: &Value) -> (Value, ToolMap) {
     let mut system_parts: Vec<String> = Vec::new();
-    if let Some(s) = body.get("instructions").and_then(Value::as_str) {
-        if !s.trim().is_empty() {
-            system_parts.push(s.to_string());
-        }
+    if let Some(s) = body.get("instructions").and_then(Value::as_str)
+        && !s.trim().is_empty()
+    {
+        system_parts.push(s.to_string());
     }
     let mut messages: Vec<Value> = Vec::new();
     let mut push = |role: &str, blocks: Vec<Value>| {
         if blocks.is_empty() {
             return;
         }
-        if let Some(last) = messages.last_mut() {
-            if last["role"] == role {
-                last["content"].as_array_mut().unwrap().extend(blocks);
-                return;
-            }
+        if let Some(last) = messages.last_mut()
+            && last["role"] == role
+        {
+            last["content"].as_array_mut().unwrap().extend(blocks);
+            return;
         }
         messages.push(json!({"role": role, "content": blocks}));
     };
@@ -194,7 +236,10 @@ pub fn convert_request(body: &Value) -> (Value, ToolMap) {
         _ => vec![],
     };
     for item in &items {
-        let ty = item.get("type").and_then(Value::as_str).unwrap_or("message");
+        let ty = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
         match ty {
             "message" => {
                 let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
@@ -203,7 +248,9 @@ pub fn convert_request(body: &Value) -> (Value, ToolMap) {
                     "system" | "developer" => {
                         let text: Vec<String> = blocks
                             .iter()
-                            .filter_map(|b| b.get("text").and_then(Value::as_str).map(str::to_string))
+                            .filter_map(|b| {
+                                b.get("text").and_then(Value::as_str).map(str::to_string)
+                            })
                             .collect();
                         system_parts.push(text.join("\n"));
                     }
@@ -214,58 +261,82 @@ pub fn convert_request(body: &Value) -> (Value, ToolMap) {
             "function_call" => {
                 let name = item.get("name").and_then(Value::as_str).unwrap_or("");
                 let ns = item.get("namespace").and_then(Value::as_str);
-                let args = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                let args = item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
                 let input = match serde_json::from_str::<Value>(args) {
                     Ok(v @ Value::Object(_)) => v,
                     Ok(v) => json!({"value": v}),
                     Err(_) => json!({"_raw_arguments": args}),
                 };
-                push("assistant", vec![json!({
-                    "type": "tool_use",
-                    "id": item.get("call_id").cloned().unwrap_or(json!("call")),
-                    "name": flatten_name(ns, name),
-                    "input": input
-                })]);
+                push(
+                    "assistant",
+                    vec![json!({
+                        "type": "tool_use",
+                        "id": item.get("call_id").cloned().unwrap_or(json!("call")),
+                        "name": flatten_name(ns, name),
+                        "input": input
+                    })],
+                );
             }
             "custom_tool_call" => {
                 let name = item.get("name").and_then(Value::as_str).unwrap_or("");
                 let ns = item.get("namespace").and_then(Value::as_str);
-                push("assistant", vec![json!({
-                    "type": "tool_use",
-                    "id": item.get("call_id").cloned().unwrap_or(json!("call")),
-                    "name": flatten_name(ns, name),
-                    "input": {"input": item.get("input").cloned().unwrap_or(json!(""))}
-                })]);
+                push(
+                    "assistant",
+                    vec![json!({
+                        "type": "tool_use",
+                        "id": item.get("call_id").cloned().unwrap_or(json!("call")),
+                        "name": flatten_name(ns, name),
+                        "input": {"input": item.get("input").cloned().unwrap_or(json!(""))}
+                    })],
+                );
             }
             "local_shell_call" => {
-                let id = item.get("call_id").or_else(|| item.get("id")).cloned().unwrap_or(json!("call"));
+                let id = item
+                    .get("call_id")
+                    .or_else(|| item.get("id"))
+                    .cloned()
+                    .unwrap_or(json!("call"));
                 let action = item.get("action").cloned().unwrap_or(json!({}));
-                push("assistant", vec![json!({
-                    "type": "tool_use",
-                    "id": id,
-                    "name": "local_shell",
-                    "input": {
-                        "command": action.get("command").cloned().unwrap_or(json!([])),
-                        "workdir": action.get("working_directory").cloned().unwrap_or(Value::Null),
-                        "timeout_ms": action.get("timeout_ms").cloned().unwrap_or(Value::Null)
-                    }
-                })]);
+                push(
+                    "assistant",
+                    vec![json!({
+                        "type": "tool_use",
+                        "id": id,
+                        "name": "local_shell",
+                        "input": {
+                            "command": action.get("command").cloned().unwrap_or(json!([])),
+                            "workdir": action.get("working_directory").cloned().unwrap_or(Value::Null),
+                            "timeout_ms": action.get("timeout_ms").cloned().unwrap_or(Value::Null)
+                        }
+                    })],
+                );
             }
             "function_call_output" | "custom_tool_call_output" | "local_shell_call_output" => {
                 let output = item.get("output").cloned().unwrap_or(json!(""));
                 match item.get("call_id").and_then(Value::as_str) {
-                    Some(call_id) => push("user", vec![json!({
-                        "type": "tool_result",
-                        "tool_use_id": call_id,
-                        "content": output_to_content(&output)
-                    })]),
+                    Some(call_id) => push(
+                        "user",
+                        vec![json!({
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": output_to_content(&output)
+                        })],
+                    ),
                     None => {
                         let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
                         let text = match &output {
                             Value::String(s) => s.clone(),
                             other => other.to_string(),
                         };
-                        push("user", vec![json!({"type": "text", "text": format!("[{name} output]\n{text}")})]);
+                        push(
+                            "user",
+                            vec![
+                                json!({"type": "text", "text": format!("[{name} output]\n{text}")}),
+                            ],
+                        );
                     }
                 }
             }
@@ -307,7 +378,9 @@ pub fn convert_request(body: &Value) -> (Value, ToolMap) {
             },
             _ => json!({"type": "auto"}),
         };
-        if body.get("parallel_tool_calls").and_then(Value::as_bool) == Some(false) && tc["type"] != "none" {
+        if body.get("parallel_tool_calls").and_then(Value::as_bool) == Some(false)
+            && tc["type"] != "none"
+        {
             tc["disable_parallel_tool_use"] = json!(true);
         }
         req["tool_choice"] = tc;
@@ -316,9 +389,23 @@ pub fn convert_request(body: &Value) -> (Value, ToolMap) {
 }
 
 enum Block {
-    Text { item_id: String, output_index: usize, text: String },
-    Reasoning { item_id: String, output_index: usize, text: String },
-    Tool { item_id: String, output_index: usize, call_id: String, name: String, json: String },
+    Text {
+        item_id: String,
+        output_index: usize,
+        text: String,
+    },
+    Reasoning {
+        item_id: String,
+        output_index: usize,
+        text: String,
+    },
+    Tool {
+        item_id: String,
+        output_index: usize,
+        call_id: String,
+        name: String,
+        json: String,
+    },
     Ignored,
 }
 
@@ -412,25 +499,49 @@ impl ResponsesEncoder {
                             "item":{"type":"message","id":item_id,"status":"in_progress","role":"assistant","content":[]}})));
                         out.push(self.ev(json!({"type":"response.content_part.added","item_id":item_id,"output_index":oi,"content_index":0,
                             "part":{"type":"output_text","text":"","annotations":[]}})));
-                        Block::Text { item_id, output_index: oi, text: String::new() }
+                        Block::Text {
+                            item_id,
+                            output_index: oi,
+                            text: String::new(),
+                        }
                     }
                     "thinking" => {
                         self.next_output += 1;
                         let item_id = format!("rs_{}", uuid::Uuid::new_v4().simple());
-                        out.push(self.ev(json!({"type":"response.output_item.added","output_index":oi,
-                            "item":{"type":"reasoning","id":item_id,"summary":[]}})));
+                        out.push(self.ev(
+                            json!({"type":"response.output_item.added","output_index":oi,
+                            "item":{"type":"reasoning","id":item_id,"summary":[]}}),
+                        ));
                         out.push(self.ev(json!({"type":"response.reasoning_summary_part.added","item_id":item_id,"output_index":oi,"summary_index":0,
                             "part":{"type":"summary_text","text":""}})));
-                        Block::Reasoning { item_id, output_index: oi, text: String::new() }
+                        Block::Reasoning {
+                            item_id,
+                            output_index: oi,
+                            text: String::new(),
+                        }
                     }
                     "tool_use" => {
                         self.next_output += 1;
                         let item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
-                        let call_id = cb.get("id").and_then(Value::as_str).unwrap_or("call").to_string();
-                        let name = cb.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                        let call_id = cb
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("call")
+                            .to_string();
+                        let name = cb
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         let item = self.tool_item(&item_id, &call_id, &name, None, "in_progress");
                         out.push(self.ev(json!({"type":"response.output_item.added","output_index":oi,"item":item})));
-                        Block::Tool { item_id, output_index: oi, call_id, name, json: String::new() }
+                        Block::Tool {
+                            item_id,
+                            output_index: oi,
+                            call_id,
+                            name,
+                            json: String::new(),
+                        }
                     }
                     _ => Block::Ignored,
                 };
@@ -441,22 +552,41 @@ impl ResponsesEncoder {
                 let d = e.get("delta").cloned().unwrap_or(json!({}));
                 let mut pending = None;
                 match self.blocks.get_mut(&idx) {
-                    Some(Block::Text { item_id, output_index, text }) => {
+                    Some(Block::Text {
+                        item_id,
+                        output_index,
+                        text,
+                    }) => {
                         if let Some(t) = d.get("text").and_then(Value::as_str) {
                             text.push_str(t);
-                            pending = Some(json!({"type":"response.output_text.delta","item_id":item_id,"output_index":output_index,"content_index":0,"delta":t}));
+                            pending = Some(
+                                json!({"type":"response.output_text.delta","item_id":item_id,"output_index":output_index,"content_index":0,"delta":t}),
+                            );
                         }
                     }
-                    Some(Block::Reasoning { item_id, output_index, text }) => {
+                    Some(Block::Reasoning {
+                        item_id,
+                        output_index,
+                        text,
+                    }) => {
                         if let Some(t) = d.get("thinking").and_then(Value::as_str) {
                             text.push_str(t);
-                            pending = Some(json!({"type":"response.reasoning_summary_text.delta","item_id":item_id,"output_index":output_index,"summary_index":0,"delta":t}));
+                            pending = Some(
+                                json!({"type":"response.reasoning_summary_text.delta","item_id":item_id,"output_index":output_index,"summary_index":0,"delta":t}),
+                            );
                         }
                     }
-                    Some(Block::Tool { item_id, output_index, json: buf, .. }) => {
+                    Some(Block::Tool {
+                        item_id,
+                        output_index,
+                        json: buf,
+                        ..
+                    }) => {
                         if let Some(t) = d.get("partial_json").and_then(Value::as_str) {
                             buf.push_str(t);
-                            pending = Some(json!({"type":"response.function_call_arguments.delta","item_id":item_id,"output_index":output_index,"delta":t}));
+                            pending = Some(
+                                json!({"type":"response.function_call_arguments.delta","item_id":item_id,"output_index":output_index,"delta":t}),
+                            );
                         }
                     }
                     _ => {}
@@ -468,7 +598,11 @@ impl ResponsesEncoder {
             "content_block_stop" => {
                 let idx = e.get("index").and_then(Value::as_u64).unwrap_or(0);
                 match self.blocks.remove(&idx) {
-                    Some(Block::Text { item_id, output_index, text }) => {
+                    Some(Block::Text {
+                        item_id,
+                        output_index,
+                        text,
+                    }) => {
                         out.push(self.ev(json!({"type":"response.output_text.done","item_id":item_id,"output_index":output_index,"content_index":0,"text":text})));
                         out.push(self.ev(json!({"type":"response.content_part.done","item_id":item_id,"output_index":output_index,"content_index":0,
                             "part":{"type":"output_text","text":text,"annotations":[]}})));
@@ -477,7 +611,11 @@ impl ResponsesEncoder {
                         out.push(self.ev(json!({"type":"response.output_item.done","output_index":output_index,"item":item})));
                         self.output.push((output_index, item));
                     }
-                    Some(Block::Reasoning { item_id, output_index, text }) => {
+                    Some(Block::Reasoning {
+                        item_id,
+                        output_index,
+                        text,
+                    }) => {
                         out.push(self.ev(json!({"type":"response.reasoning_summary_text.done","item_id":item_id,"output_index":output_index,"summary_index":0,"text":text})));
                         out.push(self.ev(json!({"type":"response.reasoning_summary_part.done","item_id":item_id,"output_index":output_index,"summary_index":0,
                             "part":{"type":"summary_text","text":text}})));
@@ -485,9 +623,20 @@ impl ResponsesEncoder {
                         out.push(self.ev(json!({"type":"response.output_item.done","output_index":output_index,"item":item})));
                         self.output.push((output_index, item));
                     }
-                    Some(Block::Tool { item_id, output_index, call_id, name, json: buf }) => {
-                        let args = if buf.trim().is_empty() { "{}".to_string() } else { buf };
-                        let item = self.tool_item(&item_id, &call_id, &name, Some(&args), "completed");
+                    Some(Block::Tool {
+                        item_id,
+                        output_index,
+                        call_id,
+                        name,
+                        json: buf,
+                    }) => {
+                        let args = if buf.trim().is_empty() {
+                            "{}".to_string()
+                        } else {
+                            buf
+                        };
+                        let item =
+                            self.tool_item(&item_id, &call_id, &name, Some(&args), "completed");
                         if item["type"] == "function_call" {
                             out.push(self.ev(json!({"type":"response.function_call_arguments.done","item_id":item_id,"output_index":output_index,"arguments":item["arguments"]})));
                         }
@@ -515,7 +664,14 @@ impl ResponsesEncoder {
         out
     }
 
-    fn tool_item(&self, item_id: &str, call_id: &str, canon: &str, args: Option<&str>, status: &str) -> Value {
+    fn tool_item(
+        &self,
+        item_id: &str,
+        call_id: &str,
+        canon: &str,
+        args: Option<&str>,
+        status: &str,
+    ) -> Value {
         let info = self.tools.get(canon).cloned().unwrap_or(ToolInfo {
             kind: ToolKind::Function,
             namespace: None,
@@ -548,7 +704,9 @@ impl ResponsesEncoder {
                 item
             }
             ToolKind::LocalShell => {
-                let a: Value = args.and_then(|a| serde_json::from_str(a).ok()).unwrap_or(json!({}));
+                let a: Value = args
+                    .and_then(|a| serde_json::from_str(a).ok())
+                    .unwrap_or(json!({}));
                 json!({"type":"local_shell_call","id":item_id,"call_id":call_id,"status":status,
                     "action":{"type":"exec","command":a.get("command").cloned().unwrap_or(json!([])),
                     "working_directory":a.get("workdir").cloned().unwrap_or(Value::Null),
@@ -559,7 +717,11 @@ impl ResponsesEncoder {
 
     fn finish(&mut self) -> Value {
         let incomplete = self.stop_reason.as_deref() == Some("max_tokens");
-        let mut r = self.response_obj(if incomplete { "incomplete" } else { "completed" });
+        let mut r = self.response_obj(if incomplete {
+            "incomplete"
+        } else {
+            "completed"
+        });
         r["usage"] = self.usage_obj();
         if incomplete {
             r["incomplete_details"] = json!({"reason": "max_output_tokens"});
@@ -584,10 +746,17 @@ fn error_body(kind: &str, code: &str, message: &str) -> Value {
     json!({"error": {"type": kind, "code": code, "message": message, "param": null}})
 }
 
-fn error_response(status: StatusCode, kind: &str, code: &str, message: &str, retry: Option<u64>) -> Response {
+fn error_response(
+    status: StatusCode,
+    kind: &str,
+    code: &str,
+    message: &str,
+    retry: Option<u64>,
+) -> Response {
     let mut resp = (status, axum::Json(error_body(kind, code, message))).into_response();
     if let Some(s) = retry {
-        resp.headers_mut().insert("retry-after", HeaderValue::from(s));
+        resp.headers_mut()
+            .insert("retry-after", HeaderValue::from(s));
     }
     resp
 }
@@ -603,31 +772,74 @@ pub fn route_error_response(err: &RouteError) -> Response {
 }
 
 pub fn session_id(headers: &HeaderMap, body: &Value) -> Option<String> {
-    session_from_headers(headers, &["session-id", "session_id", "thread-id", "conversation_id", "x-session-id"])
-        .or_else(|| body.get("prompt_cache_key").and_then(Value::as_str).map(str::to_string))
+    session_from_headers(
+        headers,
+        &[
+            "session-id",
+            "session_id",
+            "thread-id",
+            "conversation_id",
+            "x-session-id",
+        ],
+    )
+    .or_else(|| {
+        body.get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 pub async fn responses(State(app): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     if !app.authorized(&headers) {
-        return error_response(StatusCode::UNAUTHORIZED, "invalid_request_error", "invalid_api_key", "invalid model-roulette api key", None);
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_request_error",
+            "invalid_api_key",
+            "invalid model-roulette api key",
+            None,
+        );
     }
     let body = match parse_body(&headers, &body) {
         Ok(v) => v,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_body", &e, None),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_body",
+                &e,
+                None,
+            );
+        }
     };
-    let model = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let lane = match app.route_model(&model) {
         ModelRoute::Lane(l) => l,
         // The Responses surface has no passthrough target; serve via roulette.
         ModelRoute::Passthrough => Lane::Fast,
         ModelRoute::Reject => {
-            return error_response(StatusCode::NOT_FOUND, "invalid_request_error", "model_not_found", &format!("unknown model '{model}'"), None);
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                "model_not_found",
+                &format!("unknown model '{model}'"),
+                None,
+            );
         }
     };
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let session = session_id(&headers, &body);
     let (request, tools) = convert_request(&body);
-    let rr = RouteRequest { request, session, lane, headers: headers.clone(), converted: true };
+    let rr = RouteRequest {
+        request,
+        session,
+        lane,
+        headers: headers.clone(),
+        converted: true,
+    };
     let routed = match app.roulette.dispatch(rr).await {
         Ok(r) => r,
         Err(e) => return route_error_response(&e),
@@ -656,10 +868,19 @@ pub async fn responses(State(app): State<AppState>, headers: HeaderMap, body: By
         };
         let mut resp = Response::new(Body::from_stream(body));
         let h = resp.headers_mut();
-        h.insert("content-type", HeaderValue::from_static("text/event-stream"));
+        h.insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream"),
+        );
         h.insert("cache-control", HeaderValue::from_static("no-cache"));
-        h.insert("x-model-roulette-account", HeaderValue::from_str(&account).unwrap_or(HeaderValue::from_static("?")));
-        h.insert("x-model-roulette-model", HeaderValue::from_str(&upstream_model).unwrap_or(HeaderValue::from_static("?")));
+        h.insert(
+            "x-model-roulette-account",
+            HeaderValue::from_str(&account).unwrap_or(HeaderValue::from_static("?")),
+        );
+        h.insert(
+            "x-model-roulette-model",
+            HeaderValue::from_str(&upstream_model).unwrap_or(HeaderValue::from_static("?")),
+        );
         return resp;
     }
 
@@ -669,12 +890,23 @@ pub async fn responses(State(app): State<AppState>, headers: HeaderMap, body: By
         match item {
             Ok(ev) => {
                 for out in enc.push(&ev) {
-                    if matches!(out["type"].as_str(), Some("response.completed") | Some("response.incomplete")) {
+                    if matches!(
+                        out["type"].as_str(),
+                        Some("response.completed") | Some("response.incomplete")
+                    ) {
                         final_resp = out["response"].clone();
                     }
                 }
             }
-            Err(f) => return error_response(StatusCode::BAD_GATEWAY, "server_error", "upstream_error", &f.message, None),
+            Err(f) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "server_error",
+                    "upstream_error",
+                    &f.message,
+                    None,
+                );
+            }
         }
     }
     axum::Json(final_resp).into_response()
@@ -722,7 +954,10 @@ mod tests {
         assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
         assert_eq!(msgs[3]["content"][0]["input"]["input"], "*** Begin Patch");
         assert_eq!(req["tools"].as_array().unwrap().len(), 3);
-        assert_eq!(map["collab__spawn_agent"].namespace.as_deref(), Some("collab"));
+        assert_eq!(
+            map["collab__spawn_agent"].namespace.as_deref(),
+            Some("collab")
+        );
         assert_eq!(map["apply_patch"].kind, ToolKind::Custom);
         assert_eq!(req["tool_choice"]["disable_parallel_tool_use"], true);
     }
@@ -730,8 +965,22 @@ mod tests {
     #[test]
     fn encodes_events() {
         let mut map = ToolMap::new();
-        map.insert("collab__spawn_agent".into(), ToolInfo { kind: ToolKind::Function, namespace: Some("collab".into()), name: "spawn_agent".into() });
-        map.insert("apply_patch".into(), ToolInfo { kind: ToolKind::Custom, namespace: None, name: "apply_patch".into() });
+        map.insert(
+            "collab__spawn_agent".into(),
+            ToolInfo {
+                kind: ToolKind::Function,
+                namespace: Some("collab".into()),
+                name: "spawn_agent".into(),
+            },
+        );
+        map.insert(
+            "apply_patch".into(),
+            ToolInfo {
+                kind: ToolKind::Custom,
+                namespace: None,
+                name: "apply_patch".into(),
+            },
+        );
         let mut enc = ResponsesEncoder::new("model-roulette".into(), map);
         let evs = vec![
             json!({"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}),
@@ -751,7 +1000,10 @@ mod tests {
             json!({"type":"message_stop"}),
         ];
         let out: Vec<Value> = evs.iter().flat_map(|e| enc.push(e)).collect();
-        let done: Vec<&Value> = out.iter().filter(|e| e["type"] == "response.output_item.done").collect();
+        let done: Vec<&Value> = out
+            .iter()
+            .filter(|e| e["type"] == "response.output_item.done")
+            .collect();
         assert_eq!(done[0]["item"]["type"], "reasoning");
         assert_eq!(done[1]["item"]["content"][0]["text"], "Hi");
         assert_eq!(done[2]["item"]["name"], "spawn_agent");

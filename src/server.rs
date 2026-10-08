@@ -41,7 +41,10 @@ async fn models(State(app): State<AppState>) -> Response {
             "created": created, "created_at": "2026-01-01T00:00:00Z", "owned_by": "model-roulette"
         })
     };
-    let data = vec![entry(&s.model_name, "Model Roulette"), entry(&s.fast_model_name, "Model Roulette (fast)")];
+    let data = vec![
+        entry(&s.model_name, "Model Roulette"),
+        entry(&s.fast_model_name, "Model Roulette (fast)"),
+    ];
     axum::Json(json!({
         "object": "list",
         "data": data,
@@ -84,20 +87,29 @@ pub async fn start(cfg: Config) -> anyhow::Result<Running> {
             let why = if !a.cfg.enabled {
                 "disabled".to_string()
             } else {
-                format!("no API key (set {})", a.cfg.api_key_env_name().unwrap_or_else(|| "api_key".into()))
+                format!(
+                    "no API key (set {})",
+                    a.cfg.api_key_env_name().unwrap_or_else(|| "api_key".into())
+                )
             };
             tracing::warn!(account = a.id(), "account not in rotation: {why}");
         }
     }
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     let addr = listener.local_addr()?;
-    let app = router(AppState { roulette: Arc::clone(&roulette) });
+    let app = router(AppState {
+        roulette: Arc::clone(&roulette),
+    });
     let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!("server error: {e}");
         }
     });
-    Ok(Running { addr, roulette, handle })
+    Ok(Running {
+        addr,
+        roulette,
+        handle,
+    })
 }
 
 /// Run until Ctrl-C, flushing state on exit.
@@ -109,7 +121,11 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         running.addr,
         r.cfg.server.model_name,
         r.accounts.iter().filter(|a| r.usable(a)).count(),
-        r.accounts.iter().map(|a| format!("{} ({}/{})", a.id(), a.cfg.provider.as_str(), a.cfg.model())).collect::<Vec<_>>().join(" → ")
+        r.accounts
+            .iter()
+            .map(|a| format!("{} ({}/{})", a.id(), a.cfg.provider.as_str(), a.cfg.model()))
+            .collect::<Vec<_>>()
+            .join(" → ")
     );
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");

@@ -84,7 +84,10 @@ impl ProviderKind {
                 api_key_env: Some("ANTHROPIC_API_KEY"),
                 context_window: 200_000,
                 max_output_tokens: None,
-                quirks: Quirks { forward_anthropic_extras: true, ..Default::default() },
+                quirks: Quirks {
+                    forward_anthropic_extras: true,
+                    ..Default::default()
+                },
             },
             ProviderKind::Openai => Preset {
                 display: "OpenAI",
@@ -95,7 +98,11 @@ impl ProviderKind {
                 api_key_env: Some("OPENAI_API_KEY"),
                 context_window: 400_000,
                 max_output_tokens: None,
-                quirks: Quirks { max_completion_tokens: true, drop_sampling: true, ..Default::default() },
+                quirks: Quirks {
+                    max_completion_tokens: true,
+                    drop_sampling: true,
+                    ..Default::default()
+                },
             },
             ProviderKind::Gemini => Preset {
                 display: "Google Gemini",
@@ -106,7 +113,11 @@ impl ProviderKind {
                 api_key_env: Some("GEMINI_API_KEY"),
                 context_window: 1_000_000,
                 max_output_tokens: Some(65_536),
-                quirks: Quirks { gemini_thought_signatures: true, gemini_schema: true, ..Default::default() },
+                quirks: Quirks {
+                    gemini_thought_signatures: true,
+                    gemini_schema: true,
+                    ..Default::default()
+                },
             },
             ProviderKind::Meta => Preset {
                 display: "Meta (Muse)",
@@ -128,7 +139,10 @@ impl ProviderKind {
                 api_key_env: Some("DEEPSEEK_API_KEY"),
                 context_window: 128_000,
                 max_output_tokens: Some(8_192),
-                quirks: Quirks { echo_reasoning_content: true, ..Default::default() },
+                quirks: Quirks {
+                    echo_reasoning_content: true,
+                    ..Default::default()
+                },
             },
             ProviderKind::Xai => Preset {
                 display: "xAI (Grok)",
@@ -139,7 +153,10 @@ impl ProviderKind {
                 api_key_env: Some("XAI_API_KEY"),
                 context_window: 256_000,
                 max_output_tokens: None,
-                quirks: Quirks { drop_sampling: false, ..Default::default() },
+                quirks: Quirks {
+                    drop_sampling: false,
+                    ..Default::default()
+                },
             },
             ProviderKind::OpenaiCompatible => Preset {
                 display: "OpenAI-compatible",

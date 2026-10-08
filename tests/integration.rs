@@ -80,13 +80,20 @@ impl Env {
         self.mock.requests.lock().unwrap().clone()
     }
     fn requests_for(&self, account: &str) -> Vec<Value> {
-        self.requests().into_iter().filter(|r| r["account"] == account).collect()
+        self.requests()
+            .into_iter()
+            .filter(|r| r["account"] == account)
+            .collect()
     }
     fn clear(&self) {
         self.mock.requests.lock().unwrap().clear();
     }
 
-    async fn anthropic(&self, session: &str, body: Value) -> (u16, reqwest::header::HeaderMap, Vec<Value>) {
+    async fn anthropic(
+        &self,
+        session: &str,
+        body: Value,
+    ) -> (u16, reqwest::header::HeaderMap, Vec<Value>) {
         let resp = self
             .http
             .post(format!("{}/v1/messages", self.proxy))
@@ -117,7 +124,14 @@ impl Env {
     }
 
     async fn status(&self) -> Value {
-        self.http.get(format!("{}/roulette/status", self.proxy)).send().await.unwrap().json().await.unwrap()
+        self.http
+            .get(format!("{}/roulette/status", self.proxy))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
     }
 }
 
@@ -128,7 +142,9 @@ fn parse_sse(text: &str) -> Vec<Value> {
         .filter_map(|d| serde_json::from_str(d).ok())
         .collect();
     if parsed.is_empty() {
-        serde_json::from_str(text).map(|v| vec![v]).unwrap_or_default()
+        serde_json::from_str(text)
+            .map(|v| vec![v])
+            .unwrap_or_default()
     } else {
         parsed
     }
@@ -144,7 +160,8 @@ fn text_of(events: &[Value]) -> String {
 
 /// A long agentic conversation (well above the test compaction trigger).
 fn long_history(turns: usize, tool_output: usize) -> Vec<Value> {
-    let mut msgs = vec![json!({"role":"user","content":"Please refactor the parser module and add tests."})];
+    let mut msgs =
+        vec![json!({"role":"user","content":"Please refactor the parser module and add tests."})];
     for i in 0..turns {
         msgs.push(json!({"role":"assistant","content":[
             {"type":"thinking","thinking":"plan","signature":format!("sig-claude-{i}")},
@@ -173,7 +190,11 @@ fn req(messages: Vec<Value>) -> Value {
 async fn rotates_compacts_and_sticks() {
     let env = setup(
         &[
-            ("claude", ProviderKind::Anthropic, "claude?rl_after=2&retry_after=120"),
+            (
+                "claude",
+                ProviderKind::Anthropic,
+                "claude?rl_after=2&retry_after=120",
+            ),
             ("openai", ProviderKind::Openai, "openai"),
             ("gemini", ProviderKind::Gemini, "gemini?thought_sig"),
         ],
@@ -183,10 +204,16 @@ async fn rotates_compacts_and_sticks() {
 
     // Two small requests go to the first account.
     for _ in 0..2 {
-        let (st, h, ev) = env.anthropic("S1", req(vec![json!({"role":"user","content":"hello"})])).await;
+        let (st, h, ev) = env
+            .anthropic("S1", req(vec![json!({"role":"user","content":"hello"})]))
+            .await;
         assert_eq!(st, 200);
         assert_eq!(h["x-model-roulette-account"], "claude");
-        assert!(text_of(&ev).contains("[claude/claude-model]"), "{}", text_of(&ev));
+        assert!(
+            text_of(&ev).contains("[claude/claude-model]"),
+            "{}",
+            text_of(&ev)
+        );
     }
 
     // Third request: claude is rate limited -> compaction -> openai.
@@ -200,17 +227,40 @@ async fn rotates_compacts_and_sticks() {
     let reqs = env.requests();
     assert_eq!(reqs[0]["account"], "claude"); // the 429
     // Summarizer call used openai's cheap model.
-    let summarize = reqs.iter().find(|r| r["body"]["model"] == "openai-cheap").expect("summarizer call");
-    let sum_prompt = summarize["body"]["messages"][1]["content"].as_str().unwrap();
-    assert!(sum_prompt.contains("<transcript>") && sum_prompt.contains("Please refactor the parser module"));
+    let summarize = reqs
+        .iter()
+        .find(|r| r["body"]["model"] == "openai-cheap")
+        .expect("summarizer call");
+    let sum_prompt = summarize["body"]["messages"][1]["content"]
+        .as_str()
+        .unwrap();
+    assert!(
+        sum_prompt.contains("<transcript>")
+            && sum_prompt.contains("Please refactor the parser module")
+    );
     // The real request carries the summary instead of the full history.
-    let main = reqs.iter().rev().find(|r| r["body"]["model"] == "openai-model").unwrap();
+    let main = reqs
+        .iter()
+        .rev()
+        .find(|r| r["body"]["model"] == "openai-model")
+        .unwrap();
     let msgs = main["body"]["messages"].as_array().unwrap();
     assert_eq!(msgs[0]["role"], "system");
     let first_user = msgs[1]["content"].as_str().unwrap();
-    assert!(first_user.contains("<context-summary>") && first_user.contains("MOCK-SUMMARY(openai)"), "{first_user}");
-    assert!(msgs.len() < history.len(), "{} >= {}", msgs.len(), history.len());
-    assert_eq!(msgs.last().unwrap()["content"], "Now continue with the refactor.");
+    assert!(
+        first_user.contains("<context-summary>") && first_user.contains("MOCK-SUMMARY(openai)"),
+        "{first_user}"
+    );
+    assert!(
+        msgs.len() < history.len(),
+        "{} >= {}",
+        msgs.len(),
+        history.len()
+    );
+    assert_eq!(
+        msgs.last().unwrap()["content"],
+        "Now continue with the refactor."
+    );
 
     // Claude is cooling down for ~120s (retry-after).
     let status = env.status().await;
@@ -232,19 +282,40 @@ async fn rotates_compacts_and_sticks() {
     let reqs = env.requests();
     assert_eq!(reqs.len(), 1, "no extra summarizer call expected");
     let msgs = reqs[0]["body"]["messages"].as_array().unwrap();
-    assert!(msgs[1]["content"].as_str().unwrap().contains("MOCK-SUMMARY(openai)"));
+    assert!(
+        msgs[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("MOCK-SUMMARY(openai)")
+    );
     assert!(msgs.len() < grown.len());
 
     // A brand-new session skips the cooling account.
-    let (_, h, _) = env.anthropic("S2", req(vec![json!({"role":"user","content":"new session"})])).await;
+    let (_, h, _) = env
+        .anthropic(
+            "S2",
+            req(vec![json!({"role":"user","content":"new session"})]),
+        )
+        .await;
     assert_eq!(h["x-model-roulette-account"], "openai");
 
     // State survives a restart of the store (persisted to disk).
     env.running.roulette.store.flush().unwrap();
     let path = env.running.roulette.cfg.state_file();
     let persisted: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    assert!(persisted["accounts"]["claude"]["cooldown_until"].as_i64().unwrap() > 0);
-    assert!(persisted["sessions"]["S1"]["conversations"].as_object().unwrap().values().any(|c| c["checkpoint"].is_object()));
+    assert!(
+        persisted["accounts"]["claude"]["cooldown_until"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        persisted["sessions"]["S1"]["conversations"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|c| c["checkpoint"].is_object())
+    );
 }
 
 #[tokio::test]
@@ -257,10 +328,16 @@ async fn switching_between_anthropic_accounts_drops_foreign_thinking() {
         |c| c.compaction.trigger_tokens = 1_000_000, // no compaction: test signature handling
     )
     .await;
-    let (_, h, ev) = env.anthropic("T", req(vec![json!({"role":"user","content":"hi"})])).await;
+    let (_, h, ev) = env
+        .anthropic("T", req(vec![json!({"role":"user","content":"hi"})]))
+        .await;
     assert_eq!(h["x-model-roulette-account"], "c1");
     // Build the next turn from c1's reply (thinking block signed by c1).
-    let sig = ev.iter().find_map(|e| e["delta"]["signature"].as_str()).unwrap().to_string();
+    let sig = ev
+        .iter()
+        .find_map(|e| e["delta"]["signature"].as_str())
+        .unwrap()
+        .to_string();
     let history = vec![
         json!({"role":"user","content":"hi"}),
         json!({"role":"assistant","content":[{"type":"thinking","thinking":"mock thinking","signature":sig},{"type":"text","text":"hello"}]}),
@@ -272,7 +349,14 @@ async fn switching_between_anthropic_accounts_drops_foreign_thinking() {
     assert_eq!(h["x-model-roulette-account"], "c2");
     let sent = env.requests_for("c2");
     let assistant = &sent[0]["body"]["messages"][1]["content"];
-    assert!(assistant.as_array().unwrap().iter().all(|b| b["type"] != "thinking"), "{assistant}");
+    assert!(
+        assistant
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["type"] != "thinking"),
+        "{assistant}"
+    );
     // Thinking for the new turn is still requested.
     assert_eq!(sent[0]["body"]["thinking"]["type"], "adaptive");
 }
@@ -280,41 +364,68 @@ async fn switching_between_anthropic_accounts_drops_foreign_thinking() {
 #[tokio::test]
 async fn quota_exhaustion_and_all_exhausted() {
     let env = setup(
-        &[("broke", ProviderKind::Openai, "broke?quota"), ("limited", ProviderKind::Anthropic, "limited?rl_after=0&retry_after=45")],
+        &[
+            ("broke", ProviderKind::Openai, "broke?quota"),
+            (
+                "limited",
+                ProviderKind::Anthropic,
+                "limited?rl_after=0&retry_after=45",
+            ),
+        ],
         |_| {},
     )
     .await;
-    let (st, h, ev) = env.anthropic("Q", req(vec![json!({"role":"user","content":"hi"})])).await;
+    let (st, h, ev) = env
+        .anthropic("Q", req(vec![json!({"role":"user","content":"hi"})]))
+        .await;
     assert_eq!(st, 429, "{ev:?}");
     let retry: u64 = h["retry-after"].to_str().unwrap().parse().unwrap();
-    assert!(retry >= 40 && retry <= 45, "retry-after {retry}");
+    assert!((40..=45).contains(&retry), "retry-after {retry}");
     assert_eq!(ev[0]["error"]["type"], "rate_limit_error");
     let status = env.status().await;
     assert_eq!(status["accounts"][0]["last_failure"], "quota_exhausted");
     // Quota exhaustion uses the long quota cooldown.
-    assert!(status["accounts"][0]["cooldown_remaining_secs"].as_i64().unwrap() > 3600);
+    assert!(
+        status["accounts"][0]["cooldown_remaining_secs"]
+            .as_i64()
+            .unwrap()
+            > 3600
+    );
     assert_eq!(status["accounts"][1]["last_failure"], "rate_limited");
 
     // Reset puts them back in rotation.
-    env.http.post(format!("{}/roulette/reset", env.proxy)).send().await.unwrap();
+    env.http
+        .post(format!("{}/roulette/reset", env.proxy))
+        .send()
+        .await
+        .unwrap();
     let status = env.status().await;
     assert_eq!(status["accounts"][0]["cooldown_remaining_secs"], 0);
 }
 
 #[tokio::test]
 async fn context_overflow_triggers_compaction_on_same_account() {
-    let env = setup(&[("small", ProviderKind::Anthropic, "small?ctx_limit=60000")], |c| {
-        c.compaction.keep_recent_tokens = 2000;
-    })
+    let env = setup(
+        &[("small", ProviderKind::Anthropic, "small?ctx_limit=60000")],
+        |c| {
+            c.compaction.keep_recent_tokens = 2000;
+        },
+    )
     .await;
     let history = long_history(20, 4000);
     let (st, h, ev) = env.anthropic("O", req(history)).await;
     assert_eq!(st, 200, "{ev:?}");
     assert_eq!(h["x-model-roulette-account"], "small");
     let reqs = env.requests();
-    assert!(reqs.len() >= 3, "overflow, summarize, retry: {}", reqs.len());
+    assert!(
+        reqs.len() >= 3,
+        "overflow, summarize, retry: {}",
+        reqs.len()
+    );
     let last = reqs.last().unwrap();
-    let first = last["body"]["messages"][0]["content"][0]["text"].as_str().unwrap();
+    let first = last["body"]["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(first.contains("MOCK-SUMMARY(small)"));
 }
 
@@ -335,26 +446,49 @@ async fn proactive_compaction_for_small_context_window() {
 #[tokio::test]
 async fn summarizer_failure_falls_back_to_extractive_summary() {
     let env = setup(
-        &[("x", ProviderKind::Openai, "x"), ("y", ProviderKind::Openai, "y"), ("z", ProviderKind::Openai, "z?rl_after=0")],
+        &[
+            ("x", ProviderKind::Openai, "x"),
+            ("y", ProviderKind::Openai, "y"),
+            ("z", ProviderKind::Openai, "z?rl_after=0"),
+        ],
         |c| c.compaction.compactor_accounts = vec!["z".into()], // summarizer always fails
     )
     .await;
-    let (_, h, _) = env.anthropic("G", req(vec![json!({"role":"user","content":"Please refactor the parser module and add tests."})])).await;
+    let (_, h, _) = env
+        .anthropic(
+            "G",
+            req(vec![
+                json!({"role":"user","content":"Please refactor the parser module and add tests."}),
+            ]),
+        )
+        .await;
     assert_eq!(h["x-model-roulette-account"], "x");
-    env.running.roulette.store.bench("x", model_roulette::ratelimit::FailureKind::RateLimited, model_roulette::state::now_ts() + 100, "test");
+    env.running.roulette.store.bench(
+        "x",
+        model_roulette::ratelimit::FailureKind::RateLimited,
+        model_roulette::state::now_ts() + 100,
+        "test",
+    );
     env.clear();
     let (st, h, _) = env.anthropic("G", req(long_history(10, 2000))).await;
     assert_eq!(st, 200);
     assert_eq!(h["x-model-roulette-account"], "y");
     let sent = env.requests_for("y");
     let first = sent[0]["body"]["messages"][1]["content"].as_str().unwrap();
-    assert!(first.contains("Extractive summary") && first.contains("Please refactor the parser module"), "{first}");
+    assert!(
+        first.contains("Extractive summary") && first.contains("Please refactor the parser module"),
+        "{first}"
+    );
     assert!(first.contains("Read×"));
 }
 
 #[tokio::test]
 async fn codex_responses_roundtrip_with_tools_via_gemini() {
-    let env = setup(&[("gemini", ProviderKind::Gemini, "gemini?thought_sig")], |_| {}).await;
+    let env = setup(
+        &[("gemini", ProviderKind::Gemini, "gemini?thought_sig")],
+        |_| {},
+    )
+    .await;
     let tools = json!([
         {"type":"function","name":"exec_command","description":"run","strict":false,"parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}},
         {"type":"namespace","name":"multi_agent_v1","tools":[{"type":"function","name":"close_agent","parameters":{"type":"object","properties":{}}}]},
@@ -376,7 +510,10 @@ async fn codex_responses_roundtrip_with_tools_via_gemini() {
         .expect("function call")["item"]
         .clone();
     assert_eq!(call["name"], "exec_command");
-    assert_eq!(serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap()["cmd"], "ls -la");
+    assert_eq!(
+        serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap()["cmd"],
+        "ls -la"
+    );
     let done = ev.last().unwrap();
     assert_eq!(done["type"], "response.completed");
     assert!(done["response"]["usage"]["total_tokens"].as_u64().unwrap() > 0);
@@ -385,7 +522,12 @@ async fn codex_responses_roundtrip_with_tools_via_gemini() {
     let sent = env.requests();
     let fparams = &sent[0]["body"]["tools"][0]["function"]["parameters"];
     assert!(fparams.get("additionalProperties").is_none());
-    let names: Vec<&str> = sent[0]["body"]["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = sent[0]["body"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"multi_agent_v1__close_agent") && names.contains(&"apply_patch"));
 
     // Turn 2: Codex sends back the call and its output. The mock rejects the
@@ -402,35 +544,68 @@ async fn codex_responses_roundtrip_with_tools_via_gemini() {
         .find(|e| e["type"] == "response.output_item.done" && e["item"]["type"] == "message")
         .expect("message")["item"]
         .clone();
-    assert!(msg["content"][0]["text"].as_str().unwrap().contains("tool result received: total 0"));
+    assert!(
+        msg["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("tool result received: total 0")
+    );
     let sent = env.requests();
     let tc = &sent[1]["body"]["messages"][2]["tool_calls"][0];
     assert_eq!(tc["extra_content"]["google"]["thought_signature"], "gsig-1");
 
     // Namespaced and custom tools map back to Codex's item shapes.
     let input3 = json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"CALL_TOOL multi_agent_v1__close_agent {\"id\":\"a1\"}"}]}]);
-    let (_, ev) = env.responses("codex-2", json!({"model":"model-roulette","stream":true,"input":input3,"tools":tools})).await;
-    let item = ev.iter().find(|e| e["type"] == "response.output_item.done").unwrap()["item"].clone();
+    let (_, ev) = env
+        .responses(
+            "codex-2",
+            json!({"model":"model-roulette","stream":true,"input":input3,"tools":tools}),
+        )
+        .await;
+    let item = ev
+        .iter()
+        .find(|e| e["type"] == "response.output_item.done")
+        .unwrap()["item"]
+        .clone();
     assert_eq!(item["name"], "close_agent");
     assert_eq!(item["namespace"], "multi_agent_v1");
     let input4 = json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"CALL_TOOL apply_patch {\"input\":\"*** Begin Patch\\n*** End Patch\"}"}]}]);
-    let (_, ev) = env.responses("codex-3", json!({"model":"model-roulette","stream":true,"input":input4,"tools":tools})).await;
-    let item = ev.iter().find(|e| e["type"] == "response.output_item.done").unwrap()["item"].clone();
+    let (_, ev) = env
+        .responses(
+            "codex-3",
+            json!({"model":"model-roulette","stream":true,"input":input4,"tools":tools}),
+        )
+        .await;
+    let item = ev
+        .iter()
+        .find(|e| e["type"] == "response.output_item.done")
+        .unwrap()["item"]
+        .clone();
     assert_eq!(item["type"], "custom_tool_call");
     assert_eq!(item["input"], "*** Begin Patch\n*** End Patch");
 }
 
 #[tokio::test]
 async fn deepseek_reasoning_content_is_echoed_in_tool_loops() {
-    let env = setup(&[("ds", ProviderKind::Deepseek, "ds?reasoning&echo_reasoning")], |_| {}).await;
+    let env = setup(
+        &[("ds", ProviderKind::Deepseek, "ds?reasoning&echo_reasoning")],
+        |_| {},
+    )
+    .await;
     let tools = json!([{"name":"Bash","description":"run","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]);
-    let mut body = req(vec![json!({"role":"user","content":"CALL_TOOL Bash {\"command\":\"pwd\"}"})]);
+    let mut body = req(vec![
+        json!({"role":"user","content":"CALL_TOOL Bash {\"command\":\"pwd\"}"}),
+    ]);
     body["tools"] = tools.clone();
     let (st, _, ev) = env.anthropic("D", body).await;
     assert_eq!(st, 200);
     // The reasoning is surfaced as a thinking block, the call as tool_use.
     assert!(ev.iter().any(|e| e["content_block"]["type"] == "thinking"));
-    let tool = ev.iter().find(|e| e["content_block"]["type"] == "tool_use").unwrap()["content_block"].clone();
+    let tool = ev
+        .iter()
+        .find(|e| e["content_block"]["type"] == "tool_use")
+        .unwrap()["content_block"]
+        .clone();
     let id = tool["id"].as_str().unwrap();
     // Next turn as Claude Code would send it (thinking block w/o signature).
     let mut body = req(vec![
@@ -443,7 +618,10 @@ async fn deepseek_reasoning_content_is_echoed_in_tool_loops() {
     assert_eq!(st, 200, "{ev:?}");
     assert!(text_of(&ev).contains("tool result received: /home/user"));
     let sent = env.requests();
-    assert_eq!(sent[1]["body"]["messages"][2]["reasoning_content"], "mock reasoning");
+    assert_eq!(
+        sent[1]["body"]["messages"][2]["reasoning_content"],
+        "mock reasoning"
+    );
     // DeepSeek's preset caps max_tokens.
     assert_eq!(sent[1]["body"]["max_tokens"], 1024);
 }
@@ -451,28 +629,57 @@ async fn deepseek_reasoning_content_is_echoed_in_tool_loops() {
 #[tokio::test]
 async fn midstream_error_benches_account_and_next_request_moves_on() {
     let env = setup(
-        &[("flaky", ProviderKind::Anthropic, "flaky?midstream_error"), ("steady", ProviderKind::Anthropic, "steady")],
+        &[
+            ("flaky", ProviderKind::Anthropic, "flaky?midstream_error"),
+            ("steady", ProviderKind::Anthropic, "steady"),
+        ],
         |_| {},
     )
     .await;
-    let (st, _, ev) = env.anthropic("M", req(vec![json!({"role":"user","content":"hi"})])).await;
+    let (st, _, ev) = env
+        .anthropic("M", req(vec![json!({"role":"user","content":"hi"})]))
+        .await;
     assert_eq!(st, 200);
     assert_eq!(ev.last().unwrap()["type"], "error");
     assert_eq!(ev.last().unwrap()["error"]["type"], "overloaded_error");
-    let (_, h, _) = env.anthropic("M", req(vec![json!({"role":"user","content":"hi"})])).await;
+    let (_, h, _) = env
+        .anthropic("M", req(vec![json!({"role":"user","content":"hi"})]))
+        .await;
     assert_eq!(h["x-model-roulette-account"], "steady");
 }
 
 #[tokio::test]
 async fn fast_lane_passthrough_models_and_count_tokens() {
-    let env = setup(&[("a", ProviderKind::Anthropic, "a"), ("b", ProviderKind::Openai, "b")], |_| {}).await;
+    let env = setup(
+        &[
+            ("a", ProviderKind::Anthropic, "a"),
+            ("b", ProviderKind::Openai, "b"),
+        ],
+        |_| {},
+    )
+    .await;
     // Fast lane uses fast_model.
     let mut body = req(vec![json!({"role":"user","content":"title please"})]);
     body["model"] = json!("model-roulette-fast");
     body["stream"] = json!(false);
-    let resp: Value = env.http.post(format!("{}/v1/messages", env.proxy)).json(&body).send().await.unwrap().json().await.unwrap();
+    let resp: Value = env
+        .http
+        .post(format!("{}/v1/messages", env.proxy))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp["type"], "message");
-    assert!(resp["content"].as_array().unwrap().iter().any(|b| b["text"].as_str().unwrap_or("").contains("[a/a-fast]")));
+    assert!(
+        resp["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["text"].as_str().unwrap_or("").contains("[a/a-fast]"))
+    );
 
     // Unknown models pass through with the client's own key.
     body["model"] = json!("claude-opus-5-5");
@@ -490,39 +697,94 @@ async fn fast_lane_passthrough_models_and_count_tokens() {
 
     // count_tokens is answered locally for roulette models.
     body["model"] = json!("model-roulette");
-    let ct: Value = env.http.post(format!("{}/v1/messages/count_tokens", env.proxy)).json(&body).send().await.unwrap().json().await.unwrap();
+    let ct: Value = env
+        .http
+        .post(format!("{}/v1/messages/count_tokens", env.proxy))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(ct["input_tokens"].as_u64().unwrap() > 10);
 
     // /v1/models lists the roulette models.
-    let models: Value = env.http.get(format!("{}/v1/models", env.proxy)).send().await.unwrap().json().await.unwrap();
+    let models: Value = env
+        .http
+        .get(format!("{}/v1/models", env.proxy))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(models["data"][0]["id"], "model-roulette");
 }
 
 #[tokio::test]
 async fn chat_completions_frontend() {
-    let env = setup(&[("a", ProviderKind::Anthropic, "a")], |c| c.server.unknown_models = UnknownModelPolicy::Reject).await;
+    let env = setup(&[("a", ProviderKind::Anthropic, "a")], |c| {
+        c.server.unknown_models = UnknownModelPolicy::Reject
+    })
+    .await;
     let body = json!({"model":"model-roulette","stream":true,"stream_options":{"include_usage":true},
         "messages":[{"role":"system","content":"sys"},{"role":"user","content":"CALL_TOOL get_weather {\"city\":\"Paris\"}"}],
         "tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]});
-    let resp = env.http.post(format!("{}/v1/chat/completions", env.proxy)).json(&body).send().await.unwrap();
+    let resp = env
+        .http
+        .post(format!("{}/v1/chat/completions", env.proxy))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
     let text = resp.text().await.unwrap();
     assert!(text.trim_end().ends_with("data: [DONE]"));
     let chunks = parse_sse(&text);
-    let tc = chunks.iter().find(|c| c["choices"][0]["delta"]["tool_calls"].is_array()).unwrap();
-    assert_eq!(tc["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], "get_weather");
-    assert!(chunks.iter().any(|c| c["choices"][0]["finish_reason"] == "tool_calls"));
-    assert!(chunks.iter().any(|c| c["usage"]["total_tokens"].as_u64().is_some()));
+    let tc = chunks
+        .iter()
+        .find(|c| c["choices"][0]["delta"]["tool_calls"].is_array())
+        .unwrap();
+    assert_eq!(
+        tc["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+        "get_weather"
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c["choices"][0]["finish_reason"] == "tool_calls")
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c["usage"]["total_tokens"].as_u64().is_some())
+    );
 
     // Unknown model rejected by policy.
-    let r = env.http.post(format!("{}/v1/chat/completions", env.proxy)).json(&json!({"model":"gpt-x","messages":[]})).send().await.unwrap();
+    let r = env
+        .http
+        .post(format!("{}/v1/chat/completions", env.proxy))
+        .json(&json!({"model":"gpt-x","messages":[]}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status().as_u16(), 404);
     let _ = env.mock_addr;
 }
 
 #[tokio::test]
 async fn proxy_api_key_is_enforced() {
-    let env = setup(&[("a", ProviderKind::Anthropic, "a")], |c| c.server.api_key = Some("secret".into())).await;
-    let r = env.http.post(format!("{}/v1/messages", env.proxy)).json(&req(vec![json!({"role":"user","content":"x"})])).send().await.unwrap();
+    let env = setup(&[("a", ProviderKind::Anthropic, "a")], |c| {
+        c.server.api_key = Some("secret".into())
+    })
+    .await;
+    let r = env
+        .http
+        .post(format!("{}/v1/messages", env.proxy))
+        .json(&req(vec![json!({"role":"user","content":"x"})]))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status().as_u16(), 401);
     let r = env
         .http

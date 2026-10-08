@@ -35,7 +35,11 @@ impl Account {
     pub fn from_config(cfg: AccountConfig) -> Self {
         let api_key = cfg.resolve_api_key();
         let base_url = cfg.base_url().unwrap_or_default();
-        Self { cfg, api_key, base_url }
+        Self {
+            cfg,
+            api_key,
+            base_url,
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -159,8 +163,19 @@ pub fn message_to_events(msg: &Value) -> Vec<Value> {
         obj.insert("stop_reason".into(), Value::Null);
     }
     let mut out = vec![json!({"type": "message_start", "message": start})];
-    for (i, b) in msg.get("content").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().enumerate() {
-        let ty = b.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    for (i, b) in msg
+        .get("content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+    {
+        let ty = b
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         match ty.as_str() {
             "text" => {
                 out.push(json!({"type":"content_block_start","index":i,"content_block":{"type":"text","text":""}}));
@@ -206,7 +221,13 @@ mod tests {
         ];
         let evs: Vec<_> = sse_events(futures::stream::iter(chunks)).collect().await;
         let evs: Vec<SseEvent> = evs.into_iter().map(|e| e.unwrap()).collect();
-        assert_eq!(evs[0], SseEvent { event: Some("a".into()), data: "{\"x\":1}".into() });
+        assert_eq!(
+            evs[0],
+            SseEvent {
+                event: Some("a".into()),
+                data: "{\"x\":1}".into()
+            }
+        );
         assert_eq!(evs[1].data, "second\nline2");
         assert_eq!(evs[2].data, "[DONE]");
         assert_eq!(evs.len(), 3);

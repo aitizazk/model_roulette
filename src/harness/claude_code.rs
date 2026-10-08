@@ -20,7 +20,10 @@ impl ClaudeCode {
         let s = &cfg.server;
         let mut env = vec![
             ("ANTHROPIC_BASE_URL".to_string(), cfg.base_url()),
-            ("ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(), s.model_name.clone()),
+            (
+                "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
+                s.model_name.clone(),
+            ),
             (
                 "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION".to_string(),
                 "Model Roulette - rotates across your accounts on rate limits".to_string(),
@@ -31,9 +34,18 @@ impl ClaudeCode {
                 ("ANTHROPIC_MODEL".to_string(), s.model_name.clone()),
                 ("ANTHROPIC_AUTH_TOKEN".to_string(), cfg.client_key()),
                 // Background calls (titles, summaries) go through the roulette too.
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), s.fast_model_name.clone()),
-                ("ANTHROPIC_SMALL_FAST_MODEL".to_string(), s.fast_model_name.clone()),
-                ("CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(), s.harness_context_tokens.to_string()),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                    s.fast_model_name.clone(),
+                ),
+                (
+                    "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+                    s.fast_model_name.clone(),
+                ),
+                (
+                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
+                    s.harness_context_tokens.to_string(),
+                ),
             ]);
         }
         env
@@ -43,7 +55,10 @@ impl ClaudeCode {
         if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
             return PathBuf::from(dir).join("settings.json");
         }
-        dirs::home_dir().unwrap_or_default().join(".claude").join("settings.json")
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".claude")
+            .join("settings.json")
     }
 }
 
@@ -93,8 +108,12 @@ impl Harness for ClaudeCode {
             fast = s.fast_model_name,
             path = Self::settings_path().display(),
             snippet = serde_json::to_string_pretty(&json!({"env": self.env(cfg, false).into_iter()
-                .map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<_, _>>()})).unwrap()
-                .lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"),
+                .map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<_, _>>()}))
+            .unwrap()
+            .lines()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         )
     }
 
@@ -114,7 +133,9 @@ impl Harness for ClaudeCode {
             .unwrap()
             .entry("env")
             .or_insert_with(|| json!({}));
-        let env = env.as_object_mut().context("settings.env is not an object")?;
+        let env = env
+            .as_object_mut()
+            .context("settings.env is not an object")?;
         for (k, v) in self.env(cfg, false) {
             env.insert(k, json!(v));
         }

@@ -12,13 +12,20 @@ use crate::ratelimit::{FailureKind, UpstreamFailure, classify_stream_error};
 use crate::state::StateStore;
 
 /// Fields Claude Code sends that only first-party Anthropic understands.
-const ANTHROPIC_ONLY_FIELDS: &[&str] = &["context_management", "output_config", "container", "mcp_servers"];
+const ANTHROPIC_ONLY_FIELDS: &[&str] = &[
+    "context_management",
+    "output_config",
+    "container",
+    "mcp_servers",
+];
 
 pub fn build_request(call: &Call<'_>, store: &StateStore) -> (Value, Vec<(String, String)>) {
     let acct = call.account;
     let quirks = acct.cfg.preset().quirks;
     let mut body = call.request.clone();
-    let obj = body.as_object_mut().expect("canonical request is an object");
+    let obj = body
+        .as_object_mut()
+        .expect("canonical request is an object");
     obj.insert("model".into(), json!(call.model));
     obj.insert("stream".into(), json!(true));
     if !quirks.forward_anthropic_extras {
@@ -37,6 +44,12 @@ pub fn build_request(call: &Call<'_>, store: &StateStore) -> (Value, Vec<(String
         obj.insert("max_tokens".into(), json!(16_384));
     }
 
+    if !quirks.forward_anthropic_extras
+        && let Some(Value::Array(msgs)) = obj.get_mut("messages")
+        && msgs.iter().any(|m| crate::canonical::role(m) == "system")
+    {
+        *msgs = crate::canonical::sanitize_messages(std::mem::take(msgs));
+    }
     if let Some(Value::Array(msgs)) = obj.get_mut("messages") {
         for m in msgs.iter_mut() {
             clean_message(m, acct.id(), store);
@@ -44,26 +57,27 @@ pub fn build_request(call: &Call<'_>, store: &StateStore) -> (Value, Vec<(String
     }
     fix_thinking_constraint(obj);
 
-    let mut headers = vec![
-        (
-            "anthropic-version".to_string(),
-            call.client_headers
-                .get("anthropic-version")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("2023-06-01")
-                .to_string(),
-        ),
-    ];
-    if quirks.forward_anthropic_extras {
-        if let Some(beta) = call.client_headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) {
-            let filtered: Vec<&str> = beta
-                .split(',')
-                .map(str::trim)
-                .filter(|b| !b.is_empty() && !b.starts_with("oauth-"))
-                .collect();
-            if !filtered.is_empty() {
-                headers.push(("anthropic-beta".into(), filtered.join(",")));
-            }
+    let mut headers = vec![(
+        "anthropic-version".to_string(),
+        call.client_headers
+            .get("anthropic-version")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("2023-06-01")
+            .to_string(),
+    )];
+    if quirks.forward_anthropic_extras
+        && let Some(beta) = call
+            .client_headers
+            .get("anthropic-beta")
+            .and_then(|v| v.to_str().ok())
+    {
+        let filtered: Vec<&str> = beta
+            .split(',')
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && !b.starts_with("oauth-"))
+            .collect();
+        if !filtered.is_empty() {
+            headers.push(("anthropic-beta".into(), filtered.join(",")));
         }
     }
     if let Some(key) = &acct.api_key {
@@ -82,15 +96,24 @@ pub fn build_request(call: &Call<'_>, store: &StateStore) -> (Value, Vec<(String
 /// account, or synthesized from a non-Anthropic model) and make tool ids
 /// conform to Anthropic's charset.
 fn clean_message(m: &mut Value, account: &str, store: &StateStore) {
-    let Some(Value::Array(blocks)) = m.get_mut("content") else { return };
+    let Some(Value::Array(blocks)) = m.get_mut("content") else {
+        return;
+    };
     blocks.retain(|b| match b.get("type").and_then(Value::as_str) {
         Some("thinking") => {
             let sig = b.get("signature").and_then(Value::as_str).unwrap_or("");
-            !sig.is_empty() && store.signature_owner(sig).map(|o| o == account).unwrap_or(true)
+            !sig.is_empty()
+                && store
+                    .signature_owner(sig)
+                    .map(|o| o == account)
+                    .unwrap_or(true)
         }
         Some("redacted_thinking") => {
             let data = b.get("data").and_then(Value::as_str).unwrap_or("");
-            store.signature_owner(data).map(|o| o == account).unwrap_or(true)
+            store
+                .signature_owner(data)
+                .map(|o| o == account)
+                .unwrap_or(true)
         }
         _ => true,
     });
@@ -112,7 +135,13 @@ fn clean_message(m: &mut Value, account: &str, store: &StateStore) {
 pub fn sanitize_id(id: &str) -> String {
     let s: String = id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.is_empty() { "tool".into() } else { s }
 }
@@ -131,9 +160,10 @@ fn fix_thinking_constraint(obj: &mut serde_json::Map<String, Value>) {
     if !thinking_on {
         return;
     }
-    let Some(Value::Array(msgs)) = obj.get("messages") else { return };
-    let ends_in_tool_result = msgs
-        .last()
+    let Some(Value::Array(msgs)) = obj.get("messages") else {
+        return;
+    };
+    let ends_in_tool_result = crate::canonical::last_turn(msgs)
         .map(|m| {
             crate::canonical::blocks(m)
                 .iter()
@@ -143,7 +173,10 @@ fn fix_thinking_constraint(obj: &mut serde_json::Map<String, Value>) {
     if !ends_in_tool_result {
         return;
     }
-    let last_assistant = msgs.iter().rev().find(|m| crate::canonical::role(m) == "assistant");
+    let last_assistant = msgs
+        .iter()
+        .rev()
+        .find(|m| crate::canonical::role(m) == "assistant");
     let starts_with_thinking = last_assistant
         .map(|m| {
             crate::canonical::blocks(m)
@@ -175,12 +208,17 @@ pub async fn send(
 
     if !is_event_stream(&resp) {
         // Some compatible servers ignore stream=true.
-        let msg: Value = resp
-            .json()
-            .await
-            .map_err(|e| UpstreamFailure::new(FailureKind::Transient, format!("bad JSON from upstream: {e}")))?;
+        let msg: Value = resp.json().await.map_err(|e| {
+            UpstreamFailure::new(
+                FailureKind::Transient,
+                format!("bad JSON from upstream: {e}"),
+            )
+        })?;
         let events = message_to_events(&msg).into_iter().map(Ok);
-        return Ok(UpstreamResponse { events: Box::pin(futures::stream::iter(events)), headers: resp_headers });
+        return Ok(UpstreamResponse {
+            events: Box::pin(futures::stream::iter(events)),
+            headers: resp_headers,
+        });
     }
 
     let sse = sse_events(resp.bytes_stream());
@@ -203,7 +241,10 @@ pub async fn send(
             }
         }
     };
-    Ok(UpstreamResponse { events: Box::pin(events), headers: resp_headers })
+    Ok(UpstreamResponse {
+        events: Box::pin(events),
+        headers: resp_headers,
+    })
 }
 
 #[cfg(test)]
@@ -240,7 +281,12 @@ mod tests {
         store.record_signature("theirs", "b");
         let acct = account(ProviderKind::Anthropic);
         let mut h = HeaderMap::new();
-        h.insert("anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14".parse().unwrap());
+        h.insert(
+            "anthropic-beta",
+            "oauth-2025-04-20,interleaved-thinking-2025-05-14"
+                .parse()
+                .unwrap(),
+        );
         let call = Call {
             account: &acct,
             model: "m".into(),

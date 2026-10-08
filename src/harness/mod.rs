@@ -67,5 +67,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
 }
 
 pub fn find(name: &str) -> Option<Box<dyn Harness>> {
-    registry().into_iter().find(|h| h.id() == name || h.aliases().contains(&name))
+    registry()
+        .into_iter()
+        .find(|h| h.id() == name || h.aliases().contains(&name))
 }

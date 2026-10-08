@@ -33,14 +33,20 @@ fn user_blocks(content: &Value) -> Vec<Value> {
         Value::Array(parts) => parts
             .iter()
             .filter_map(|p| match p.get("type").and_then(Value::as_str) {
-                Some("text") => Some(json!({"type": "text", "text": p.get("text").cloned().unwrap_or(json!(""))})),
+                Some("text") => Some(
+                    json!({"type": "text", "text": p.get("text").cloned().unwrap_or(json!(""))}),
+                ),
                 Some("image_url") => {
                     let url = p.pointer("/image_url/url").and_then(Value::as_str)?;
-                    Some(match url.strip_prefix("data:").and_then(|r| r.split_once(',')) {
-                        Some((meta, data)) => json!({"type": "image", "source": {"type": "base64",
-                            "media_type": meta.trim_end_matches(";base64"), "data": data}}),
-                        None => json!({"type": "image", "source": {"type": "url", "url": url}}),
-                    })
+                    Some(
+                        match url.strip_prefix("data:").and_then(|r| r.split_once(',')) {
+                            Some((meta, data)) => {
+                                json!({"type": "image", "source": {"type": "base64",
+                            "media_type": meta.trim_end_matches(";base64"), "data": data}})
+                            }
+                            None => json!({"type": "image", "source": {"type": "url", "url": url}}),
+                        },
+                    )
                 }
                 _ => None,
             })
@@ -53,7 +59,12 @@ fn user_blocks(content: &Value) -> Vec<Value> {
 pub fn convert_request(body: &Value) -> (Value, HashMap<String, String>) {
     let mut system = Vec::new();
     let mut messages: Vec<Value> = Vec::new();
-    for m in body.get("messages").and_then(Value::as_array).cloned().unwrap_or_default() {
+    for m in body
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         let content = m.get("content").cloned().unwrap_or(Value::Null);
         match m.get("role").and_then(Value::as_str).unwrap_or("user") {
             "system" | "developer" => system.push(text_of(&content)),
@@ -63,8 +74,16 @@ pub fn convert_request(body: &Value) -> (Value, HashMap<String, String>) {
                 if !t.is_empty() {
                     blocks.push(json!({"type": "text", "text": t}));
                 }
-                for tc in m.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default() {
-                    let args = tc.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
+                for tc in m
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    let args = tc
+                        .pointer("/function/arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}");
                     blocks.push(json!({
                         "type": "tool_use",
                         "id": tc.get("id").cloned().unwrap_or(json!("call")),
@@ -126,7 +145,11 @@ pub fn convert_request(body: &Value) -> (Value, HashMap<String, String>) {
         req["tool_choice"] = match body.get("tool_choice") {
             Some(Value::String(s)) if s == "required" => json!({"type": "any"}),
             Some(Value::String(s)) if s == "none" => json!({"type": "none"}),
-            Some(Value::Object(o)) => match o.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) {
+            Some(Value::Object(o)) => match o
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+            {
                 Some(n) => json!({"type": "tool", "name": safe_tool_name(n)}),
                 None => json!({"type": "auto"}),
             },
@@ -183,9 +206,16 @@ impl ChatEncoder {
                     self.next_tool += 1;
                     self.tool_index.insert(e["index"].as_u64().unwrap_or(0), i);
                     let canon = cb["name"].as_str().unwrap_or("");
-                    let name = self.names.get(canon).cloned().unwrap_or_else(|| canon.to_string());
-                    let c = self.chunk(json!({"tool_calls": [{"index": i, "id": cb["id"], "type": "function",
-                        "function": {"name": name, "arguments": ""}}]}), None);
+                    let name = self
+                        .names
+                        .get(canon)
+                        .cloned()
+                        .unwrap_or_else(|| canon.to_string());
+                    let c = self.chunk(
+                        json!({"tool_calls": [{"index": i, "id": cb["id"], "type": "function",
+                        "function": {"name": name, "arguments": ""}}]}),
+                        None,
+                    );
                     out.push(c);
                 }
             }
@@ -193,9 +223,15 @@ impl ChatEncoder {
                 let d = &e["delta"];
                 match d["type"].as_str().unwrap_or("") {
                     "text_delta" => out.push(self.chunk(json!({"content": d["text"]}), None)),
-                    "thinking_delta" => out.push(self.chunk(json!({"reasoning_content": d["thinking"]}), None)),
+                    "thinking_delta" => {
+                        out.push(self.chunk(json!({"reasoning_content": d["thinking"]}), None))
+                    }
                     "input_json_delta" => {
-                        if let Some(i) = self.tool_index.get(&e["index"].as_u64().unwrap_or(0)).copied() {
+                        if let Some(i) = self
+                            .tool_index
+                            .get(&e["index"].as_u64().unwrap_or(0))
+                            .copied()
+                        {
                             out.push(self.chunk(json!({"tool_calls": [{"index": i, "function": {"arguments": d["partial_json"]}}]}), None));
                         }
                     }
@@ -209,11 +245,14 @@ impl ChatEncoder {
             }
             "message_delta" => {
                 if let Some(s) = e.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                    self.finish = Some(match s {
-                        "tool_use" => "tool_calls",
-                        "max_tokens" => "length",
-                        _ => "stop",
-                    }.to_string());
+                    self.finish = Some(
+                        match s {
+                            "tool_use" => "tool_calls",
+                            "max_tokens" => "length",
+                            _ => "stop",
+                        }
+                        .to_string(),
+                    );
                 }
                 if let Some(Value::Object(u)) = e.get("usage") {
                     for (k, v) in u {
@@ -247,10 +286,18 @@ impl ChatEncoder {
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
-    (status, axum::Json(json!({"error": {"type": "invalid_request_error", "message": message}}))).into_response()
+    (
+        status,
+        axum::Json(json!({"error": {"type": "invalid_request_error", "message": message}})),
+    )
+        .into_response()
 }
 
-pub async fn chat_completions(State(app): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+pub async fn chat_completions(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if !app.authorized(&headers) {
         return error_response(StatusCode::UNAUTHORIZED, "invalid model-roulette api key");
     }
@@ -258,18 +305,33 @@ pub async fn chat_completions(State(app): State<AppState>, headers: HeaderMap, b
         Ok(v) => v,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
-    let model = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let lane = match app.route_model(&model) {
         ModelRoute::Lane(l) => l,
         ModelRoute::Passthrough => Lane::Fast,
-        ModelRoute::Reject => return error_response(StatusCode::NOT_FOUND, &format!("unknown model '{model}'")),
+        ModelRoute::Reject => {
+            return error_response(StatusCode::NOT_FOUND, &format!("unknown model '{model}'"));
+        }
     };
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let include_usage = body.pointer("/stream_options/include_usage").and_then(Value::as_bool).unwrap_or(false);
+    let include_usage = body
+        .pointer("/stream_options/include_usage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let session = session_from_headers(&headers, &["x-session-id", "session-id", "session_id"])
         .or_else(|| body.get("user").and_then(Value::as_str).map(str::to_string));
     let (request, names) = convert_request(&body);
-    let rr = RouteRequest { request, session, lane, headers: headers.clone(), converted: true };
+    let rr = RouteRequest {
+        request,
+        session,
+        lane,
+        headers: headers.clone(),
+        converted: true,
+    };
     let routed = match app.roulette.dispatch(rr).await {
         Ok(r) => r,
         Err(e) => return route_error_response(&e),
@@ -297,7 +359,10 @@ pub async fn chat_completions(State(app): State<AppState>, headers: HeaderMap, b
             yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
         };
         let mut resp = Response::new(Body::from_stream(body));
-        resp.headers_mut().insert("content-type", HeaderValue::from_static("text/event-stream"));
+        resp.headers_mut().insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream"),
+        );
         return resp;
     }
 
@@ -320,7 +385,11 @@ pub async fn chat_completions(State(app): State<AppState>, headers: HeaderMap, b
             Some("text") => text.push_str(b["text"].as_str().unwrap_or("")),
             Some("tool_use") => {
                 let canon = b["name"].as_str().unwrap_or("");
-                let name = enc.names.get(canon).cloned().unwrap_or_else(|| canon.to_string());
+                let name = enc
+                    .names
+                    .get(canon)
+                    .cloned()
+                    .unwrap_or_else(|| canon.to_string());
                 tool_calls.push(json!({"id": b["id"], "type": "function",
                     "function": {"name": name, "arguments": b["input"].to_string()}}));
             }

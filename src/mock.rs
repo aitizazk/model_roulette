@@ -67,7 +67,10 @@ fn behaviour(headers: &HeaderMap) -> Behaviour {
         })
         .unwrap_or_else(|| "anonymous".into());
     let (name, opts) = key.split_once('?').unwrap_or((&key, ""));
-    let mut b = Behaviour { name: name.to_string(), ..Default::default() };
+    let mut b = Behaviour {
+        name: name.to_string(),
+        ..Default::default()
+    };
     for kv in opts.split('&').filter(|s| !s.is_empty()) {
         let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
         match k {
@@ -118,6 +121,7 @@ async fn clear_requests(State(st): State<Arc<MockState>>) -> Response {
 
 /// Shared gatekeeping. Returns the 1-based request number for this account or
 /// an error response.
+#[allow(clippy::result_large_err)]
 fn admit(st: &MockState, b: &Behaviour, wire: &str, body: &Value) -> Result<u64, Response> {
     let n = {
         let mut c = st.counts.lock().unwrap();
@@ -125,7 +129,10 @@ fn admit(st: &MockState, b: &Behaviour, wire: &str, body: &Value) -> Result<u64,
         *e += 1;
         *e
     };
-    st.requests.lock().unwrap().push(json!({"account": b.name, "wire": wire, "n": n, "body": body}));
+    st.requests
+        .lock()
+        .unwrap()
+        .push(json!({"account": b.name, "wire": wire, "n": n, "body": body}));
     if let Some(status) = b.fail {
         let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         return Err((code, axum::Json(json!({"error": {"type": "api_error", "message": format!("mock failure {status}")}}))).into_response());
@@ -141,19 +148,29 @@ fn admit(st: &MockState, b: &Behaviour, wire: &str, body: &Value) -> Result<u64,
     if let Some(limit) = b.ctx_limit {
         let len = body.to_string().len();
         if len > limit {
-            return Err((StatusCode::BAD_REQUEST, axum::Json(json!({"type":"error","error":{"type":"invalid_request_error",
-                "message":format!("prompt is too long: {len} > {limit} maximum")}}))).into_response());
+            return Err((
+                StatusCode::BAD_REQUEST,
+                axum::Json(
+                    json!({"type":"error","error":{"type":"invalid_request_error",
+                "message":format!("prompt is too long: {len} > {limit} maximum")}}),
+                ),
+            )
+                .into_response());
         }
     }
-    if let Some(limit) = b.rl_after {
-        if n > limit {
-            let mut r = (StatusCode::TOO_MANY_REQUESTS, axum::Json(json!({"type":"error","error":{"type":"rate_limit_error",
-                "message":format!("mock rate limit for {}", b.name)}}))).into_response();
-            if let Some(s) = b.retry_after {
-                r.headers_mut().insert("retry-after", HeaderValue::from(s));
-            }
-            return Err(r);
+    if let Some(limit) = b.rl_after
+        && n > limit
+    {
+        let mut r = (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(json!({"type":"error","error":{"type":"rate_limit_error",
+                "message":format!("mock rate limit for {}", b.name)}})),
+        )
+            .into_response();
+        if let Some(s) = b.retry_after {
+            r.headers_mut().insert("retry-after", HeaderValue::from(s));
         }
+        return Err(r);
     }
     Ok(n)
 }
@@ -164,26 +181,52 @@ enum Reply {
 }
 
 /// Decide the reply from a normalized view of the conversation.
-fn decide(b: &Behaviour, model: &str, system: &str, last_user_text: Option<String>, last_is_tool_result: Option<String>, tools: &[String], n_messages: usize) -> Reply {
+fn decide(
+    b: &Behaviour,
+    model: &str,
+    system: &str,
+    last_user_text: Option<String>,
+    last_is_tool_result: Option<String>,
+    tools: &[String],
+    n_messages: usize,
+) -> Reply {
     if system.contains("context compactor") {
-        return Reply::Text(format!("MOCK-SUMMARY({}): the user is working on a task; {} messages summarized.", b.name, n_messages));
+        return Reply::Text(format!(
+            "MOCK-SUMMARY({}): the user is working on a task; {} messages summarized.",
+            b.name, n_messages
+        ));
     }
     if let Some(res) = last_is_tool_result {
         let short: String = res.chars().take(120).collect();
-        return Reply::Text(format!("[{}] tool result received: {}", b.name, short.trim()));
+        return Reply::Text(format!(
+            "[{}] tool result received: {}",
+            b.name,
+            short.trim()
+        ));
     }
     let text = last_user_text.unwrap_or_default();
     if let Some(pos) = text.find("CALL_TOOL ") {
         let rest = &text[pos + 10..];
         let (name, json_part) = rest.split_once(' ').unwrap_or((rest, "{}"));
         let name = name.trim().to_string();
-        if tools.iter().any(|t| *t == name) {
-            let input = serde_json::from_str(json_part.trim()).unwrap_or(json!({}));
+        if tools.contains(&name) {
+            // Parse the first JSON value; anything after it is ignored.
+            let input = serde_json::Deserializer::from_str(json_part.trim_start())
+                .into_iter::<Value>()
+                .next()
+                .and_then(Result::ok)
+                .unwrap_or(json!({}));
             return Reply::Tool { name, input };
         }
     }
     let short: String = text.chars().take(60).collect();
-    Reply::Text(format!("[{}/{}] reply to: {} (messages={})", b.name, model, short.trim(), n_messages))
+    Reply::Text(format!(
+        "[{}/{}] reply to: {} (messages={})",
+        b.name,
+        model,
+        short.trim(),
+        n_messages
+    ))
 }
 
 fn sse(events: Vec<(Option<&str>, Value)>) -> Response {
@@ -195,7 +238,10 @@ fn sse(events: Vec<(Option<&str>, Value)>) -> Response {
         s.push_str(&format!("data: {data}\n\n"));
     }
     let mut r = Response::new(Body::from(s));
-    r.headers_mut().insert("content-type", HeaderValue::from_static("text/event-stream"));
+    r.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("text/event-stream"),
+    );
     r
 }
 
@@ -212,24 +258,56 @@ async fn anthropic(State(st): State<Arc<MockState>>, headers: HeaderMap, body: B
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":"first message must use the user role"}}))).into_response();
     }
     let system = crate::canonical::system_text(&req);
-    let last = msgs.last().cloned().unwrap_or(json!({}));
+    let last = msgs
+        .iter()
+        .rev()
+        .find(|m| m["role"] != "system")
+        .cloned()
+        .unwrap_or(json!({}));
     let blocks = crate::canonical::blocks(&last);
-    let tool_res = blocks.iter().find(|x| x["type"] == "tool_result").map(crate::canonical::tool_result_text);
-    let text = blocks.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n");
-    let tools: Vec<String> = req["tools"].as_array().cloned().unwrap_or_default().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect();
+    let tool_res = blocks
+        .iter()
+        .find(|x| x["type"] == "tool_result")
+        .map(crate::canonical::tool_result_text);
+    let text = blocks
+        .iter()
+        .filter_map(|x| x["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tools: Vec<String> = req["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect();
     let model = req["model"].as_str().unwrap_or("").to_string();
-    let reply = decide(&b, &model, &system, Some(text), tool_res, &tools, msgs.len());
+    let reply = decide(
+        &b,
+        &model,
+        &system,
+        Some(text),
+        tool_res,
+        &tools,
+        msgs.len(),
+    );
     let input_tokens = crate::canonical::estimate_request_tokens(&req);
 
-    let mut evs: Vec<(Option<&str>, Value)> = vec![(Some("message_start"), json!({"type":"message_start","message":{
+    let mut evs: Vec<(Option<&str>, Value)> = vec![(
+        Some("message_start"),
+        json!({"type":"message_start","message":{
         "id": format!("msg_mock_{}_{n}", b.name), "type":"message","role":"assistant","model":model,"content":[],
-        "stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":input_tokens,"output_tokens":1}}}))];
+        "stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":input_tokens,"output_tokens":1}}}),
+    )];
     let stop = match &reply {
         Reply::Text(t) => {
             evs.push((Some("content_block_start"), json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}})));
             evs.push((Some("content_block_delta"), json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"mock thinking"}})));
             evs.push((Some("content_block_delta"), json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":format!("sig-{}-{n}", b.name)}})));
-            evs.push((Some("content_block_stop"), json!({"type":"content_block_stop","index":0})));
+            evs.push((
+                Some("content_block_stop"),
+                json!({"type":"content_block_stop","index":0}),
+            ));
             evs.push((Some("content_block_start"), json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}})));
             let (a, c) = t.split_at(t.len() / 2);
             evs.push((Some("content_block_delta"), json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":a}})));
@@ -238,13 +316,19 @@ async fn anthropic(State(st): State<Arc<MockState>>, headers: HeaderMap, body: B
                 return sse(evs);
             }
             evs.push((Some("content_block_delta"), json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":c}})));
-            evs.push((Some("content_block_stop"), json!({"type":"content_block_stop","index":1})));
+            evs.push((
+                Some("content_block_stop"),
+                json!({"type":"content_block_stop","index":1}),
+            ));
             "end_turn"
         }
         Reply::Tool { name, input } => {
             evs.push((Some("content_block_start"), json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":format!("toolu_mock_{n}"),"name":name,"input":{}}})));
             evs.push((Some("content_block_delta"), json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input.to_string()}})));
-            evs.push((Some("content_block_stop"), json!({"type":"content_block_stop","index":0})));
+            evs.push((
+                Some("content_block_stop"),
+                json!({"type":"content_block_stop","index":0}),
+            ));
             "tool_use"
         }
     };
@@ -267,12 +351,21 @@ async fn chat(State(st): State<Arc<MockState>>, headers: HeaderMap, body: Bytes)
         Err(r) => return r,
     };
     let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-    let bad = |m: &str| (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"type":"invalid_request_error","message":m}}))).into_response();
+    let bad = |m: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error":{"type":"invalid_request_error","message":m}})),
+        )
+            .into_response()
+    };
     for m in &msgs {
         if m["role"] == "assistant" && m.get("tool_calls").is_some() {
             if b.thought_sig {
                 let first = &m["tool_calls"][0];
-                if first.pointer("/extra_content/google/thought_signature").is_none() {
+                if first
+                    .pointer("/extra_content/google/thought_signature")
+                    .is_none()
+                {
                     return bad("Function call is missing a thought_signature");
                 }
             }
@@ -281,28 +374,73 @@ async fn chat(State(st): State<Arc<MockState>>, headers: HeaderMap, body: Bytes)
             }
         }
     }
-    let system = msgs.iter().filter(|m| m["role"] == "system").filter_map(|m| m["content"].as_str()).collect::<Vec<_>>().join("\n");
-    let last = msgs.last().cloned().unwrap_or(json!({}));
-    let tool_res = (last["role"] == "tool").then(|| last["content"].as_str().unwrap_or("").to_string());
+    let system = msgs
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .filter_map(|m| m["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let last = msgs
+        .iter()
+        .rev()
+        .find(|m| m["role"] != "system")
+        .cloned()
+        .unwrap_or(json!({}));
+    let tool_res =
+        (last["role"] == "tool").then(|| last["content"].as_str().unwrap_or("").to_string());
     let text = match &last["content"] {
         Value::String(s) => s.clone(),
-        Value::Array(p) => p.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        Value::Array(p) => p
+            .iter()
+            .filter_map(|x| x["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => String::new(),
     };
-    let tools: Vec<String> = req["tools"].as_array().cloned().unwrap_or_default().iter().filter_map(|t| t.pointer("/function/name").and_then(Value::as_str).map(str::to_string)).collect();
+    let tools: Vec<String> = req["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| {
+            t.pointer("/function/name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
     let model = req["model"].as_str().unwrap_or("").to_string();
-    let reply = decide(&b, &model, &system, Some(text), tool_res, &tools, msgs.len());
+    let reply = decide(
+        &b,
+        &model,
+        &system,
+        Some(text),
+        tool_res,
+        &tools,
+        msgs.len(),
+    );
     let id = format!("chatcmpl-mock-{}-{n}", b.name);
     let chunk = |delta: Value, finish: Value| json!({"id":id,"object":"chat.completion.chunk","model":model,"choices":[{"index":0,"delta":delta,"finish_reason":finish}]});
     let mut evs: Vec<(Option<&str>, Value)> = Vec::new();
     if b.reasoning {
-        evs.push((None, chunk(json!({"role":"assistant","reasoning_content":"mock "}), Value::Null)));
-        evs.push((None, chunk(json!({"reasoning_content":"reasoning"}), Value::Null)));
+        evs.push((
+            None,
+            chunk(
+                json!({"role":"assistant","reasoning_content":"mock "}),
+                Value::Null,
+            ),
+        ));
+        evs.push((
+            None,
+            chunk(json!({"reasoning_content":"reasoning"}), Value::Null),
+        ));
     }
     let finish = match &reply {
         Reply::Text(t) => {
             let (a, c) = t.split_at(t.len() / 2);
-            evs.push((None, chunk(json!({"role":"assistant","content":a}), Value::Null)));
+            evs.push((
+                None,
+                chunk(json!({"role":"assistant","content":a}), Value::Null),
+            ));
             evs.push((None, chunk(json!({"content":c}), Value::Null)));
             "stop"
         }
@@ -311,11 +449,26 @@ async fn chat(State(st): State<Arc<MockState>>, headers: HeaderMap, body: Bytes)
             if b.thought_sig {
                 tc["extra_content"] = json!({"google":{"thought_signature":format!("gsig-{n}")}});
             }
-            evs.push((None, chunk(json!({"role":"assistant","tool_calls":[tc]}), Value::Null)));
+            evs.push((
+                None,
+                chunk(json!({"role":"assistant","tool_calls":[tc]}), Value::Null),
+            ));
             let args = input.to_string();
             let (a, c) = args.split_at(args.len() / 2);
-            evs.push((None, chunk(json!({"tool_calls":[{"index":0,"function":{"arguments":a}}]}), Value::Null)));
-            evs.push((None, chunk(json!({"tool_calls":[{"index":0,"function":{"arguments":c}}]}), Value::Null)));
+            evs.push((
+                None,
+                chunk(
+                    json!({"tool_calls":[{"index":0,"function":{"arguments":a}}]}),
+                    Value::Null,
+                ),
+            ));
+            evs.push((
+                None,
+                chunk(
+                    json!({"tool_calls":[{"index":0,"function":{"arguments":c}}]}),
+                    Value::Null,
+                ),
+            ));
             "tool_calls"
         }
     };
@@ -326,7 +479,9 @@ async fn chat(State(st): State<Arc<MockState>>, headers: HeaderMap, body: Bytes)
     if req["stream"].as_bool() == Some(true) {
         // Append the terminator.
         let body = std::mem::replace(r.body_mut(), Body::empty());
-        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .unwrap_or_default();
         let mut v = bytes.to_vec();
         v.extend_from_slice(b"data: [DONE]\n\n");
         *r.body_mut() = Body::from(v);
@@ -334,7 +489,9 @@ async fn chat(State(st): State<Arc<MockState>>, headers: HeaderMap, body: Bytes)
     } else {
         let content = match &reply {
             Reply::Text(t) => json!({"role":"assistant","content":t}),
-            Reply::Tool { name, input } => json!({"role":"assistant","content":null,"tool_calls":[{"id":format!("call_mock_{n}"),"type":"function","function":{"name":name,"arguments":input.to_string()}}]}),
+            Reply::Tool { name, input } => {
+                json!({"role":"assistant","content":null,"tool_calls":[{"id":format!("call_mock_{n}"),"type":"function","function":{"name":name,"arguments":input.to_string()}}]})
+            }
         };
         axum::Json(json!({"id":id,"object":"chat.completion","model":model,"choices":[{"index":0,"message":content,"finish_reason":finish}],
             "usage":{"prompt_tokens":prompt_tokens,"completion_tokens":12,"total_tokens":prompt_tokens+12}})).into_response()

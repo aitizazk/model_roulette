@@ -119,7 +119,11 @@ impl StateStore {
                 }
             })
             .unwrap_or_default();
-        Arc::new(Self { inner: Mutex::new(state), path, dirty: Notify::new() })
+        Arc::new(Self {
+            inner: Mutex::new(state),
+            path,
+            dirty: Notify::new(),
+        })
     }
 
     pub fn lock(&self) -> MutexGuard<'_, PersistedState> {
@@ -138,7 +142,9 @@ impl StateStore {
     }
 
     pub fn flush(&self) -> std::io::Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         let json = {
             let mut st = self.lock();
             prune(&mut st);
@@ -175,7 +181,11 @@ impl StateStore {
     }
 
     pub fn is_available(&self, id: &str, now: i64) -> bool {
-        self.lock().accounts.get(id).map(|a| a.available_at(now)).unwrap_or(true)
+        self.lock()
+            .accounts
+            .get(id)
+            .map(|a| a.available_at(now))
+            .unwrap_or(true)
     }
 
     pub fn record_success(&self, id: &str) {
@@ -220,7 +230,8 @@ impl StateStore {
             return;
         }
         self.update(|st| {
-            st.thinking_signatures.insert(crate::canonical::hash_str(sig), account.to_string());
+            st.thinking_signatures
+                .insert(crate::canonical::hash_str(sig), account.to_string());
             while st.thinking_signatures.len() > MAX_SIGNATURES {
                 st.thinking_signatures.shift_remove_index(0);
             }
@@ -228,7 +239,10 @@ impl StateStore {
     }
 
     pub fn signature_owner(&self, sig: &str) -> Option<String> {
-        self.lock().thinking_signatures.get(&crate::canonical::hash_str(sig)).cloned()
+        self.lock()
+            .thinking_signatures
+            .get(&crate::canonical::hash_str(sig))
+            .cloned()
     }
 
     pub fn put_tool_extra(&self, call_id: &str, f: impl FnOnce(&mut ToolExtra)) {
@@ -247,8 +261,11 @@ impl StateStore {
 
 fn prune(st: &mut PersistedState) {
     if st.sessions.len() > MAX_SESSIONS {
-        let mut by_age: Vec<(i64, String)> =
-            st.sessions.iter().map(|(k, s)| (s.last_used, k.clone())).collect();
+        let mut by_age: Vec<(i64, String)> = st
+            .sessions
+            .iter()
+            .map(|(k, s)| (s.last_used, k.clone()))
+            .collect();
         by_age.sort();
         let excess = st.sessions.len() - MAX_SESSIONS;
         for (_, k) in by_age.into_iter().take(excess) {
@@ -257,8 +274,11 @@ fn prune(st: &mut PersistedState) {
     }
     for s in st.sessions.values_mut() {
         if s.conversations.len() > MAX_CONVERSATIONS_PER_SESSION {
-            let mut by_age: Vec<(i64, String)> =
-                s.conversations.iter().map(|(k, c)| (c.last_used, k.clone())).collect();
+            let mut by_age: Vec<(i64, String)> = s
+                .conversations
+                .iter()
+                .map(|(k, c)| (c.last_used, k.clone()))
+                .collect();
             by_age.sort();
             let excess = s.conversations.len() - MAX_CONVERSATIONS_PER_SESSION;
             for (_, k) in by_age.into_iter().take(excess) {

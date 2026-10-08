@@ -16,7 +16,7 @@ use bytes::Bytes;
 use serde_json::Value;
 
 use crate::config::UnknownModelPolicy;
-use crate::roulette::{Lane, RouteError, Roulette};
+use crate::roulette::{Lane, Roulette, RouteError};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -48,7 +48,9 @@ impl AppState {
 
     /// Check the client's key if the proxy requires one.
     pub fn authorized(&self, headers: &HeaderMap) -> bool {
-        let Some(expected) = &self.roulette.cfg.server.api_key else { return true };
+        let Some(expected) = &self.roulette.cfg.server.api_key else {
+            return true;
+        };
         let presented = headers
             .get("x-api-key")
             .and_then(|v| v.to_str().ok())
@@ -65,18 +67,23 @@ impl AppState {
 
 /// Parse a JSON body, transparently handling gzip/deflate encodings.
 pub fn parse_body(headers: &HeaderMap, body: &Bytes) -> Result<Value, String> {
-    let enc = headers.get("content-encoding").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let enc = headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     let decoded: Vec<u8> = match enc {
         "gzip" => {
             let mut d = flate2::read::GzDecoder::new(&body[..]);
             let mut out = Vec::new();
-            d.read_to_end(&mut out).map_err(|e| format!("bad gzip body: {e}"))?;
+            d.read_to_end(&mut out)
+                .map_err(|e| format!("bad gzip body: {e}"))?;
             out
         }
         "deflate" => {
             let mut d = flate2::read::ZlibDecoder::new(&body[..]);
             let mut out = Vec::new();
-            d.read_to_end(&mut out).map_err(|e| format!("bad deflate body: {e}"))?;
+            d.read_to_end(&mut out)
+                .map_err(|e| format!("bad deflate body: {e}"))?;
             out
         }
         _ => body.to_vec(),
@@ -87,11 +94,14 @@ pub fn parse_body(headers: &HeaderMap, body: &Bytes) -> Result<Value, String> {
 /// Status code and retry-after for a routing error.
 pub fn error_status(err: &RouteError) -> (StatusCode, Option<u64>) {
     match err {
-        RouteError::Exhausted { retry_after, .. } => {
-            (StatusCode::TOO_MANY_REQUESTS, Some(retry_after.map(|d| d.as_secs().max(1)).unwrap_or(30)))
-        }
+        RouteError::Exhausted { retry_after, .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(retry_after.map(|d| d.as_secs().max(1)).unwrap_or(30)),
+        ),
         RouteError::Upstream(f) => (
-            f.status.and_then(|s| StatusCode::from_u16(s).ok()).unwrap_or(StatusCode::BAD_REQUEST),
+            f.status
+                .and_then(|s| StatusCode::from_u16(s).ok())
+                .unwrap_or(StatusCode::BAD_REQUEST),
             None,
         ),
         RouteError::NoAccounts => (StatusCode::SERVICE_UNAVAILABLE, None),
@@ -101,7 +111,11 @@ pub fn error_status(err: &RouteError) -> (StatusCode, Option<u64>) {
 /// Extract a session id from typical harness headers / body fields.
 pub fn session_from_headers(headers: &HeaderMap, names: &[&str]) -> Option<String> {
     names.iter().find_map(|n| {
-        headers.get(*n).and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty()).map(str::to_string)
+        headers
+            .get(*n)
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     })
 }
 

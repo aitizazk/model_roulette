@@ -90,7 +90,7 @@ pub struct RotationConfig {
     /// Bench an account as soon as response headers say its remaining
     /// request/token budget is zero, before a 429 happens.
     pub preemptive: bool,
-    /// Upstream request timeout.
+    /// Abort an upstream request if no bytes arrive for this long.
     pub request_timeout_secs: u64,
 }
 
@@ -218,7 +218,10 @@ impl AccountConfig {
     }
 
     pub fn model(&self) -> &str {
-        self.model.as_deref().or(self.preset().default_model).unwrap_or("default")
+        self.model
+            .as_deref()
+            .or(self.preset().default_model)
+            .unwrap_or("default")
     }
 
     pub fn compact_model(&self) -> &str {
@@ -252,15 +255,17 @@ impl AccountConfig {
     }
 
     pub fn api_key_env_name(&self) -> Option<String> {
-        self.api_key_env.clone().or(self.preset().api_key_env.map(str::to_string))
+        self.api_key_env
+            .clone()
+            .or(self.preset().api_key_env.map(str::to_string))
     }
 
     /// Resolve the API key: literal, then the configured/preset env var.
     pub fn resolve_api_key(&self) -> Option<String> {
-        if let Some(k) = &self.api_key {
-            if !k.is_empty() {
-                return Some(k.clone());
-            }
+        if let Some(k) = &self.api_key
+            && !k.is_empty()
+        {
+            return Some(k.clone());
         }
         let var = self.api_key_env_name()?;
         std::env::var(var).ok().filter(|v| !v.is_empty())
@@ -272,7 +277,9 @@ impl Config {
         if let Ok(dir) = std::env::var("MODEL_ROULETTE_HOME") {
             return PathBuf::from(dir);
         }
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".model-roulette")
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".model-roulette")
     }
 
     pub fn default_path() -> PathBuf {
@@ -298,7 +305,11 @@ impl Config {
                 bail!("duplicate account id '{}'", a.id);
             }
             if a.base_url().is_none() {
-                bail!("account '{}' (provider {}) needs a base_url", a.id, a.provider.as_str());
+                bail!(
+                    "account '{}' (provider {}) needs a base_url",
+                    a.id,
+                    a.provider.as_str()
+                );
             }
             if a.model.is_none() && a.preset().default_model.is_none() {
                 bail!("account '{}' needs a model", a.id);
@@ -318,13 +329,20 @@ impl Config {
     }
 
     pub fn base_url(&self) -> String {
-        let host = if self.server.host == "0.0.0.0" { "127.0.0.1" } else { &self.server.host };
+        let host = if self.server.host == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &self.server.host
+        };
         format!("http://{}:{}", host, self.server.port)
     }
 
     /// Key harnesses should present to the proxy.
     pub fn client_key(&self) -> String {
-        self.server.api_key.clone().unwrap_or_else(|| "model-roulette".to_string())
+        self.server
+            .api_key
+            .clone()
+            .unwrap_or_else(|| "model-roulette".to_string())
     }
 }
 
@@ -412,15 +430,17 @@ mod tests {
         cfg.validate().unwrap();
         assert_eq!(cfg.accounts.len(), 5);
         assert_eq!(cfg.accounts[2].compact_model(), "gemini-3.5-flash");
-        assert_eq!(cfg.accounts[1].base_url().unwrap(), "https://api.openai.com/v1");
+        assert_eq!(
+            cfg.accounts[1].base_url().unwrap(),
+            "https://api.openai.com/v1"
+        );
     }
 
     #[test]
     fn compatible_needs_base_url() {
-        let cfg: Config = toml::from_str(
-            "[[accounts]]\nid='x'\nprovider='openai_compatible'\nmodel='m'\n",
-        )
-        .unwrap();
+        let cfg: Config =
+            toml::from_str("[[accounts]]\nid='x'\nprovider='openai_compatible'\nmodel='m'\n")
+                .unwrap();
         assert!(cfg.validate().is_err());
     }
 }

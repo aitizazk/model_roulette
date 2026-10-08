@@ -48,7 +48,12 @@ impl std::fmt::Display for UpstreamFailure {
 
 impl UpstreamFailure {
     pub fn new(kind: FailureKind, message: impl Into<String>) -> Self {
-        Self { kind, status: None, message: message.into(), retry_after: None }
+        Self {
+            kind,
+            status: None,
+            message: message.into(),
+            retry_after: None,
+        }
     }
 
     pub fn network(err: impl std::fmt::Display) -> Self {
@@ -101,7 +106,11 @@ fn error_message(body: &str) -> String {
     if s.len() > 500 {
         s.truncate(s.floor_char_boundary(500));
     }
-    if s.is_empty() { "(empty body)".into() } else { s }
+    if s.is_empty() {
+        "(empty body)".into()
+    } else {
+        s
+    }
 }
 
 /// Classify a non-2xx upstream response.
@@ -114,7 +123,8 @@ pub fn classify(status: u16, headers: &HeaderMap, body: &str) -> UpstreamFailure
         429 => {
             // Gemini says "exceeded your current quota" for per-minute limits
             // too, but includes a retry delay; trust the hint when present.
-            if hint.is_none() && (has(QUOTA_MARKERS) || lower.contains("exceeded your current quota"))
+            if hint.is_none()
+                && (has(QUOTA_MARKERS) || lower.contains("exceeded your current quota"))
             {
                 FailureKind::QuotaExhausted
             } else {
@@ -146,7 +156,12 @@ pub fn classify(status: u16, headers: &HeaderMap, body: &str) -> UpstreamFailure
         500..=599 => FailureKind::Transient,
         _ => FailureKind::BadRequest,
     };
-    UpstreamFailure { kind, status: Some(status), message: error_message(body), retry_after: hint }
+    UpstreamFailure {
+        kind,
+        status: Some(status),
+        message: error_message(body),
+        retry_after: hint,
+    }
 }
 
 /// Classify an error delivered inside a stream (Anthropic `error` events,
@@ -177,22 +192,35 @@ pub fn classify_stream_error(err: &Value) -> UpstreamFailure {
     } else {
         FailureKind::Transient
     };
-    UpstreamFailure { kind, status: None, message, retry_after: None }
+    UpstreamFailure {
+        kind,
+        status: None,
+        message,
+        retry_after: None,
+    }
 }
 
 /// Look for a reset hint in headers and body.
 pub fn retry_hint(headers: &HeaderMap, body: &str) -> Option<Duration> {
-    let h = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    let h = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
 
     // Standard Retry-After: seconds or HTTP date.
     if let Some(v) = h("retry-after") {
-        if let Ok(secs) = v.parse::<f64>() {
-            if secs >= 0.0 {
-                return Some(Duration::from_secs_f64(secs));
-            }
+        if let Ok(secs) = v.parse::<f64>()
+            && secs >= 0.0
+        {
+            return Some(Duration::from_secs_f64(secs));
         }
         if let Ok(t) = httpdate::parse_http_date(v) {
-            return Some(t.duration_since(std::time::SystemTime::now()).unwrap_or_default());
+            return Some(
+                t.duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default(),
+            );
         }
     }
     if let Some(v) = h("retry-after-ms").and_then(|v| v.parse::<f64>().ok()) {
@@ -202,22 +230,44 @@ pub fn retry_hint(headers: &HeaderMap, body: &str) -> Option<Duration> {
     // Anthropic: RFC 3339 reset timestamps. Use the latest exhausted one or
     // the earliest of all when we can't tell which limit tripped.
     let anthropic: Vec<(Option<&str>, &str)> = [
-        ("anthropic-ratelimit-requests-remaining", "anthropic-ratelimit-requests-reset"),
-        ("anthropic-ratelimit-tokens-remaining", "anthropic-ratelimit-tokens-reset"),
-        ("anthropic-ratelimit-input-tokens-remaining", "anthropic-ratelimit-input-tokens-reset"),
-        ("anthropic-ratelimit-output-tokens-remaining", "anthropic-ratelimit-output-tokens-reset"),
-        ("anthropic-ratelimit-unified-remaining", "anthropic-ratelimit-unified-reset"),
+        (
+            "anthropic-ratelimit-requests-remaining",
+            "anthropic-ratelimit-requests-reset",
+        ),
+        (
+            "anthropic-ratelimit-tokens-remaining",
+            "anthropic-ratelimit-tokens-reset",
+        ),
+        (
+            "anthropic-ratelimit-input-tokens-remaining",
+            "anthropic-ratelimit-input-tokens-reset",
+        ),
+        (
+            "anthropic-ratelimit-output-tokens-remaining",
+            "anthropic-ratelimit-output-tokens-reset",
+        ),
+        (
+            "anthropic-ratelimit-unified-remaining",
+            "anthropic-ratelimit-unified-reset",
+        ),
     ]
     .into_iter()
     .filter_map(|(rem, reset)| h(reset).map(|r| (h(rem), r)))
     .collect();
-    if let Some(d) = pick_reset(anthropic.iter().map(|(rem, r)| (*rem, parse_reset_value(r)))) {
+    if let Some(d) = pick_reset(
+        anthropic
+            .iter()
+            .map(|(rem, r)| (*rem, parse_reset_value(r))),
+    ) {
         return Some(d);
     }
 
     // OpenAI style: x-ratelimit-reset-requests: "1s", "6m0s".
     let openai: Vec<(Option<&str>, &str)> = [
-        ("x-ratelimit-remaining-requests", "x-ratelimit-reset-requests"),
+        (
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests",
+        ),
         ("x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens"),
         ("x-ratelimit-remaining", "x-ratelimit-reset"),
     ]
@@ -229,10 +279,10 @@ pub fn retry_hint(headers: &HeaderMap, body: &str) -> Option<Duration> {
     }
 
     // Gemini: google.rpc.RetryInfo { retryDelay: "37s" } in the body.
-    if let Ok(v) = serde_json::from_str::<Value>(body) {
-        if let Some(d) = find_retry_delay(&v) {
-            return Some(d);
-        }
+    if let Ok(v) = serde_json::from_str::<Value>(body)
+        && let Some(d) = find_retry_delay(&v)
+    {
+        return Some(d);
     }
     let lower = body.to_ascii_lowercase();
     // "Please try again in 20s" / "retry in 1m30s" (OpenAI, Gemini text).
@@ -251,7 +301,9 @@ pub fn retry_hint(headers: &HeaderMap, body: &str) -> Option<Duration> {
     None
 }
 
-fn pick_reset<'a>(items: impl Iterator<Item = (Option<&'a str>, Option<Duration>)>) -> Option<Duration> {
+fn pick_reset<'a>(
+    items: impl Iterator<Item = (Option<&'a str>, Option<Duration>)>,
+) -> Option<Duration> {
     let items: Vec<_> = items.collect();
     let exhausted = items
         .iter()
@@ -334,12 +386,29 @@ pub fn parse_go_duration(s: &str) -> Option<Duration> {
 /// On a successful response: if headers say the budget is already exhausted,
 /// return how long until it resets so the account can be benched early.
 pub fn preemptive_cooldown(headers: &HeaderMap) -> Option<Duration> {
-    let h = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    let h = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
     let pairs = [
-        ("anthropic-ratelimit-requests-remaining", "anthropic-ratelimit-requests-reset"),
-        ("anthropic-ratelimit-tokens-remaining", "anthropic-ratelimit-tokens-reset"),
-        ("anthropic-ratelimit-input-tokens-remaining", "anthropic-ratelimit-input-tokens-reset"),
-        ("x-ratelimit-remaining-requests", "x-ratelimit-reset-requests"),
+        (
+            "anthropic-ratelimit-requests-remaining",
+            "anthropic-ratelimit-requests-reset",
+        ),
+        (
+            "anthropic-ratelimit-tokens-remaining",
+            "anthropic-ratelimit-tokens-reset",
+        ),
+        (
+            "anthropic-ratelimit-input-tokens-remaining",
+            "anthropic-ratelimit-input-tokens-reset",
+        ),
+        (
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests",
+        ),
         ("x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens"),
     ];
     pairs
@@ -358,7 +427,10 @@ mod tests {
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();
         for (k, v) in pairs {
-            h.insert(HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
+            h.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
         }
         h
     }
@@ -410,7 +482,11 @@ mod tests {
             r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#,
         );
         assert_eq!(f.kind, FailureKind::ContextOverflow);
-        let f = classify(400, &HeaderMap::new(), r#"{"error":{"message":"tools.0: bad schema"}}"#);
+        let f = classify(
+            400,
+            &HeaderMap::new(),
+            r#"{"error":{"message":"tools.0: bad schema"}}"#,
+        );
         assert_eq!(f.kind, FailureKind::BadRequest);
     }
 
@@ -428,22 +504,38 @@ mod tests {
 
     #[test]
     fn openai_reset_headers() {
-        let h = headers(&[("x-ratelimit-remaining-requests", "0"), ("x-ratelimit-reset-requests", "6m0s")]);
+        let h = headers(&[
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-reset-requests", "6m0s"),
+        ]);
         assert_eq!(retry_hint(&h, ""), Some(Duration::from_secs(360)));
     }
 
     #[test]
     fn deepseek_402_and_overload() {
-        assert_eq!(classify(402, &HeaderMap::new(), "Insufficient Balance").kind, FailureKind::QuotaExhausted);
-        assert_eq!(classify(529, &HeaderMap::new(), "overloaded").kind, FailureKind::Transient);
-        assert_eq!(classify(401, &HeaderMap::new(), "bad key").kind, FailureKind::AccountError);
+        assert_eq!(
+            classify(402, &HeaderMap::new(), "Insufficient Balance").kind,
+            FailureKind::QuotaExhausted
+        );
+        assert_eq!(
+            classify(529, &HeaderMap::new(), "overloaded").kind,
+            FailureKind::Transient
+        );
+        assert_eq!(
+            classify(401, &HeaderMap::new(), "bad key").kind,
+            FailureKind::AccountError
+        );
     }
 
     #[test]
     fn stream_errors() {
-        let f = classify_stream_error(&serde_json::json!({"type":"overloaded_error","message":"Overloaded"}));
+        let f = classify_stream_error(
+            &serde_json::json!({"type":"overloaded_error","message":"Overloaded"}),
+        );
         assert_eq!(f.kind, FailureKind::Transient);
-        let f = classify_stream_error(&serde_json::json!({"type":"rate_limit_error","message":"slow down"}));
+        let f = classify_stream_error(
+            &serde_json::json!({"type":"rate_limit_error","message":"slow down"}),
+        );
         assert_eq!(f.kind, FailureKind::RateLimited);
     }
 }

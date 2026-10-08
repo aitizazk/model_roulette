@@ -36,13 +36,21 @@ impl NameMap {
         }
         let valid = !name.is_empty()
             && name.len() <= 64
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
         let mapped = if valid {
             name.to_string()
         } else {
             let clean: String = name
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let hash = &crate::canonical::hash_str(name)[..8];
             let keep = clean.len().min(55);
@@ -54,7 +62,10 @@ impl NameMap {
     }
 
     pub fn canonical(&self, upstream: &str) -> String {
-        self.to_canonical.get(upstream).cloned().unwrap_or_else(|| upstream.to_string())
+        self.to_canonical
+            .get(upstream)
+            .cloned()
+            .unwrap_or_else(|| upstream.to_string())
     }
 }
 
@@ -65,14 +76,32 @@ pub fn build_request(call: &Call<'_>, store: &StateStore) -> (Value, NameMap) {
     let mut names = NameMap::default();
     let mut messages: Vec<Value> = Vec::new();
 
-    let system = system_text(req);
+    // Claude Code embeds an Anthropic billing marker line in its system
+    // prompt; it means nothing to other providers.
+    let system: String = system_text(req)
+        .lines()
+        .filter(|l| !l.starts_with("x-anthropic-billing-header:"))
+        .collect::<Vec<_>>()
+        .join("\n");
     if !system.trim().is_empty() {
         messages.push(json!({"role": "system", "content": system}));
     }
 
-    for m in req.get("messages").and_then(Value::as_array).cloned().unwrap_or_default() {
+    for m in req
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         match role(&m) {
             "assistant" => messages.push(convert_assistant(&m, &mut names, store, quirks)),
+            "system" => {
+                let text: Vec<String> = blocks(&m)
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(Value::as_str).map(str::to_string))
+                    .collect();
+                messages.push(json!({"role": "system", "content": text.join("\n")}));
+            }
             _ => convert_user(&m, &mut messages),
         }
     }
@@ -88,7 +117,11 @@ pub fn build_request(call: &Call<'_>, store: &StateStore) -> (Value, NameMap) {
         max_tokens = Some(max_tokens.unwrap_or(cap).min(cap));
     }
     if let Some(mt) = max_tokens {
-        let key = if quirks.max_completion_tokens { "max_completion_tokens" } else { "max_tokens" };
+        let key = if quirks.max_completion_tokens {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
         body.insert(key.into(), json!(mt));
     }
     if !quirks.drop_sampling {
@@ -98,10 +131,10 @@ pub fn build_request(call: &Call<'_>, store: &StateStore) -> (Value, NameMap) {
             }
         }
     }
-    if let Some(stops) = req.get("stop_sequences").and_then(Value::as_array) {
-        if !stops.is_empty() {
-            body.insert("stop".into(), Value::Array(stops.clone()));
-        }
+    if let Some(stops) = req.get("stop_sequences").and_then(Value::as_array)
+        && !stops.is_empty()
+    {
+        body.insert("stop".into(), Value::Array(stops.clone()));
     }
     if let Some(effort) = &acct.cfg.reasoning_effort {
         body.insert("reasoning_effort".into(), json!(effort));
@@ -163,7 +196,8 @@ fn convert_user(m: &Value, out: &mut Vec<Value>) {
     let mut tool_images: Vec<Value> = Vec::new();
     for b in blocks(m) {
         match b.get("type").and_then(Value::as_str).unwrap_or("") {
-            "text" => parts.push(json!({"type": "text", "text": b.get("text").cloned().unwrap_or(json!(""))})),
+            "text" => parts
+                .push(json!({"type": "text", "text": b.get("text").cloned().unwrap_or(json!(""))})),
             "image" => {
                 if let Some(p) = image_part(&b) {
                     parts.push(p);
@@ -192,7 +226,8 @@ fn convert_user(m: &Value, out: &mut Vec<Value>) {
     }
     out.extend(tool_msgs);
     if !tool_images.is_empty() {
-        let mut p = vec![json!({"type": "text", "text": "Images returned by the tool call(s) above:"})];
+        let mut p =
+            vec![json!({"type": "text", "text": "Images returned by the tool call(s) above:"})];
         p.extend(tool_images);
         out.push(json!({"role": "user", "content": p}));
     }
@@ -215,7 +250,9 @@ fn image_part(b: &Value) -> Option<Value> {
     let url = match src.get("type").and_then(Value::as_str) {
         Some("base64") => format!(
             "data:{};base64,{}",
-            src.get("media_type").and_then(Value::as_str).unwrap_or("image/png"),
+            src.get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png"),
             src.get("data").and_then(Value::as_str).unwrap_or("")
         ),
         Some("url") => src.get("url")?.as_str()?.to_string(),
@@ -236,7 +273,11 @@ fn convert_assistant(m: &Value, names: &mut NameMap, store: &StateStore, quirks:
                 text.push_str(b.get("text").and_then(Value::as_str).unwrap_or(""));
             }
             "tool_use" => {
-                let id = b.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                let id = b
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let name = b.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = b.get("input").cloned().unwrap_or(json!({}));
                 let mut tc = json!({
@@ -248,7 +289,11 @@ fn convert_assistant(m: &Value, names: &mut NameMap, store: &StateStore, quirks:
                     let sig = store
                         .tool_extra(&id)
                         .and_then(|e| e.gemini_thought_signature)
-                        .or_else(|| tool_calls.is_empty().then(|| GEMINI_SKIP_SIGNATURE.to_string()));
+                        .or_else(|| {
+                            tool_calls
+                                .is_empty()
+                                .then(|| GEMINI_SKIP_SIGNATURE.to_string())
+                        });
                     if let Some(sig) = sig {
                         tc["extra_content"] = json!({"google": {"thought_signature": sig}});
                     }
@@ -299,7 +344,9 @@ fn clean_schema(v: &mut Value, gemini: bool) {
                     map.remove(*k);
                 }
             }
-            if map.get("type").and_then(Value::as_str) == Some("object") && !map.contains_key("properties") {
+            if map.get("type").and_then(Value::as_str) == Some("object")
+                && !map.contains_key("properties")
+            {
                 map.insert("properties".into(), json!({}));
             }
             for (k, child) in map.iter_mut() {
@@ -339,10 +386,12 @@ pub async fn send(
     let store = Arc::clone(store);
 
     if !is_event_stream(&resp) {
-        let full: Value = resp
-            .json()
-            .await
-            .map_err(|e| UpstreamFailure::new(FailureKind::Transient, format!("bad JSON from upstream: {e}")))?;
+        let full: Value = resp.json().await.map_err(|e| {
+            UpstreamFailure::new(
+                FailureKind::Transient,
+                format!("bad JSON from upstream: {e}"),
+            )
+        })?;
         let chunks = completion_to_chunks(&full);
         let mut conv = ChunkConverter::new(model, names, quirks, store);
         let mut out = Vec::new();
@@ -356,7 +405,10 @@ pub async fn send(
             }
         }
         out.extend(conv.finish().into_iter().map(Ok));
-        return Ok(UpstreamResponse { events: Box::pin(futures::stream::iter(out)), headers });
+        return Ok(UpstreamResponse {
+            events: Box::pin(futures::stream::iter(out)),
+            headers,
+        });
     }
 
     let sse = sse_events(resp.bytes_stream());
@@ -377,7 +429,10 @@ pub async fn send(
         }
         for e in conv.finish() { yield Ok(e); }
     };
-    Ok(UpstreamResponse { events: Box::pin(events), headers })
+    Ok(UpstreamResponse {
+        events: Box::pin(events),
+        headers,
+    })
 }
 
 /// Turn a non-streamed chat completion into equivalent stream chunks.
@@ -500,7 +555,11 @@ impl ChunkConverter {
         for (_, t) in std::mem::take(&mut self.tools) {
             let name = self.names.canonical(&t.name);
             out.push(json!({"type":"content_block_start","index":self.index,"content_block":{"type":"tool_use","id":t.id,"name":name,"input":{}}}));
-            let args = if t.args.trim().is_empty() { "{}".to_string() } else { t.args };
+            let args = if t.args.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                t.args
+            };
             let args = match serde_json::from_str::<Value>(&args) {
                 Ok(v) if v.is_object() => args,
                 Ok(v) => json!({"value": v}).to_string(),
@@ -520,7 +579,10 @@ impl ChunkConverter {
         self.start(&mut out);
         if let Some(u) = chunk.get("usage").filter(|u| !u.is_null()) {
             let input = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let output = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let output = u
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let cached = u
                 .pointer("/prompt_tokens_details/cached_tokens")
                 .and_then(Value::as_u64)
@@ -532,7 +594,9 @@ impl ChunkConverter {
                 "cache_read_input_tokens": cached
             });
         }
-        let Some(choice) = chunk.pointer("/choices/0") else { return Ok(out) };
+        let Some(choice) = chunk.pointer("/choices/0") else {
+            return Ok(out);
+        };
         let delta = choice.get("delta").cloned().unwrap_or(json!({}));
 
         let reasoning = delta
@@ -551,21 +615,24 @@ impl ChunkConverter {
             out.push(json!({"type":"content_block_delta","index":self.index,"delta":{"type":"thinking_delta","thinking":reasoning}}));
         }
 
-        if let Some(text) = delta.get("content").and_then(Value::as_str) {
-            if !text.is_empty() {
-                self.flush_tools(&mut out);
-                if self.open != Open::Text {
-                    self.close(&mut out);
-                    out.push(json!({"type":"content_block_start","index":self.index,"content_block":{"type":"text","text":""}}));
-                    self.open = Open::Text;
-                }
-                out.push(json!({"type":"content_block_delta","index":self.index,"delta":{"type":"text_delta","text":text}}));
+        if let Some(text) = delta.get("content").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            self.flush_tools(&mut out);
+            if self.open != Open::Text {
+                self.close(&mut out);
+                out.push(json!({"type":"content_block_start","index":self.index,"content_block":{"type":"text","text":""}}));
+                self.open = Open::Text;
             }
+            out.push(json!({"type":"content_block_delta","index":self.index,"delta":{"type":"text_delta","text":text}}));
         }
 
         if let Some(Value::Array(tcs)) = delta.get("tool_calls") {
             for tc in tcs {
-                let up_idx = tc.get("index").and_then(Value::as_u64).unwrap_or(self.tools.len() as u64);
+                let up_idx = tc
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(self.tools.len() as u64);
                 if !self.tools.contains_key(&up_idx) {
                     let id = tc
                         .get("id")
@@ -577,23 +644,33 @@ impl ChunkConverter {
                         self.first_tool_id = Some(id.clone());
                     }
                     self.saw_tool = true;
-                    self.tools.insert(up_idx, ToolBuf { id, name: String::new(), args: String::new() });
+                    self.tools.insert(
+                        up_idx,
+                        ToolBuf {
+                            id,
+                            name: String::new(),
+                            args: String::new(),
+                        },
+                    );
                 }
                 let t = self.tools.get_mut(&up_idx).unwrap();
-                if let Some(n) = tc.pointer("/function/name").and_then(Value::as_str) {
-                    if t.name.is_empty() {
-                        t.name = n.to_string();
-                    }
+                if let Some(n) = tc.pointer("/function/name").and_then(Value::as_str)
+                    && t.name.is_empty()
+                {
+                    t.name = n.to_string();
                 }
                 if let Some(a) = tc.pointer("/function/arguments").and_then(Value::as_str) {
                     t.args.push_str(a);
                 }
-                if let Some(sig) = tc.pointer("/extra_content/google/thought_signature").and_then(Value::as_str) {
-                    if self.quirks.gemini_thought_signatures {
-                        let sig = sig.to_string();
-                        let id = t.id.clone();
-                        self.store.put_tool_extra(&id, |e| e.gemini_thought_signature = Some(sig));
-                    }
+                if let Some(sig) = tc
+                    .pointer("/extra_content/google/thought_signature")
+                    .and_then(Value::as_str)
+                    && self.quirks.gemini_thought_signatures
+                {
+                    let sig = sig.to_string();
+                    let id = t.id.clone();
+                    self.store
+                        .put_tool_extra(&id, |e| e.gemini_thought_signature = Some(sig));
                 }
             }
         }
@@ -609,11 +686,13 @@ impl ChunkConverter {
         self.start(&mut out);
         self.flush_tools(&mut out);
         self.close(&mut out);
-        if self.quirks.echo_reasoning_content && !self.reasoning.is_empty() {
-            if let Some(id) = &self.first_tool_id {
-                let rc = self.reasoning.clone();
-                self.store.put_tool_extra(id, |e| e.reasoning_content = Some(rc));
-            }
+        if self.quirks.echo_reasoning_content
+            && !self.reasoning.is_empty()
+            && let Some(id) = &self.first_tool_id
+        {
+            let rc = self.reasoning.clone();
+            self.store
+                .put_tool_extra(id, |e| e.reasoning_content = Some(rc));
         }
         let stop = match self.finish.as_deref() {
             _ if self.saw_tool => "tool_use",
@@ -686,29 +765,46 @@ mod tests {
         let (body, names) = build_request(&call, &store);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
-        assert_eq!(msgs[1]["content"][1]["image_url"]["url"], "data:image/png;base64,AAA");
+        assert_eq!(
+            msgs[1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAA"
+        );
         assert_eq!(msgs[2]["content"], "calling");
-        let up_name = msgs[2]["tool_calls"][0]["function"]["name"].as_str().unwrap();
+        let up_name = msgs[2]["tool_calls"][0]["function"]["name"]
+            .as_str()
+            .unwrap();
         assert!(up_name.len() <= 64);
         assert_eq!(names.canonical(up_name), long_name);
-        assert_eq!(msgs[2]["tool_calls"][0]["extra_content"]["google"]["thought_signature"], GEMINI_SKIP_SIGNATURE);
+        assert_eq!(
+            msgs[2]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            GEMINI_SKIP_SIGNATURE
+        );
         assert_eq!(msgs[3]["role"], "tool");
         assert_eq!(msgs[3]["content"], "Error: res");
         assert_eq!(msgs[4]["content"], "next");
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
-        assert!(tools[0]["function"]["parameters"].get("additionalProperties").is_none());
-        assert!(tools[0]["function"]["parameters"]["properties"]["a"].get("exclusiveMinimum").is_none());
+        assert!(
+            tools[0]["function"]["parameters"]
+                .get("additionalProperties")
+                .is_none()
+        );
+        assert!(
+            tools[0]["function"]["parameters"]["properties"]["a"]
+                .get("exclusiveMinimum")
+                .is_none()
+        );
         assert_eq!(body["tool_choice"], "required");
         assert_eq!(body["reasoning_effort"], "low");
-        assert_eq!(body["max_tokens"], 32000.min(65536));
+        assert_eq!(body["max_tokens"], 32000);
     }
 
     #[test]
     fn converts_stream_with_reasoning_and_tools() {
         let store = StateStore::open(None);
         let quirks = ProviderKind::Deepseek.preset().quirks;
-        let mut conv = ChunkConverter::new("m".into(), NameMap::default(), quirks, Arc::clone(&store));
+        let mut conv =
+            ChunkConverter::new("m".into(), NameMap::default(), quirks, Arc::clone(&store));
         let chunks = [
             json!({"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"think "}}]}),
             json!({"choices":[{"index":0,"delta":{"reasoning_content":"more"}}]}),
@@ -738,14 +834,20 @@ mod tests {
         assert_eq!(m["stop_reason"], "tool_use");
         assert_eq!(m["usage"]["input_tokens"], 60);
         assert_eq!(m["usage"]["cache_read_input_tokens"], 40);
-        assert_eq!(store.tool_extra("c1").unwrap().reasoning_content.as_deref(), Some("think more"));
+        assert_eq!(
+            store.tool_extra("c1").unwrap().reasoning_content.as_deref(),
+            Some("think more")
+        );
     }
 
     #[test]
     fn stream_error_chunk() {
         let store = StateStore::open(None);
-        let mut conv = ChunkConverter::new("m".into(), NameMap::default(), Quirks::default(), store);
-        let err = conv.push(&json!({"error":{"message":"Rate limit reached","type":"rate_limit_error"}})).unwrap_err();
+        let mut conv =
+            ChunkConverter::new("m".into(), NameMap::default(), Quirks::default(), store);
+        let err = conv
+            .push(&json!({"error":{"message":"Rate limit reached","type":"rate_limit_error"}}))
+            .unwrap_err();
         assert_eq!(err.kind, FailureKind::RateLimited);
     }
 }

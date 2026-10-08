@@ -93,7 +93,11 @@ pub fn tool_result_text(block: &Value) -> String {
         Some(Value::Array(a)) => a
             .iter()
             .map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("text") => b.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                Some("text") => b
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 Some("image") => "[image]".to_string(),
                 Some(other) => format!("[{other}]"),
                 None => String::new(),
@@ -133,7 +137,7 @@ pub fn message_digest(msg: &Value) -> String {
                 out.push_str("r:");
                 out.push_str(b.get("tool_use_id").and_then(Value::as_str).unwrap_or(""));
             }
-            "image" => out.push_str("i"),
+            "image" => out.push('i'),
             "thinking" | "redacted_thinking" => continue,
             other => {
                 out.push_str("o:");
@@ -145,14 +149,38 @@ pub fn message_digest(msg: &Value) -> String {
     out
 }
 
-/// Hash of the first `n` messages.
+/// Hash of the first `n` conversation turns (user/assistant messages;
+/// mid-conversation system messages are ignored because harnesses inject and
+/// regenerate them freely).
 pub fn prefix_hash(messages: &[Value], n: usize) -> String {
     let mut h = 0xcbf29ce484222325u64;
-    for m in messages.iter().take(n) {
+    for m in messages.iter().filter(|m| role(m) != "system").take(n) {
         h = fnv1a(message_digest(m).as_bytes(), h);
         h = fnv1a(b"\x1e", h);
     }
     format!("{h:016x}-{n}")
+}
+
+/// Raw index just after the `n`-th user/assistant message.
+pub fn turn_cut_index(messages: &[Value], n: usize) -> Option<usize> {
+    if n == 0 {
+        return Some(0);
+    }
+    let mut count = 0;
+    for (i, m) in messages.iter().enumerate() {
+        if role(m) != "system" {
+            count += 1;
+            if count == n {
+                return Some(i + 1);
+            }
+        }
+    }
+    None
+}
+
+/// Number of user/assistant messages in `messages`.
+pub fn turn_count(messages: &[Value]) -> usize {
+    messages.iter().filter(|m| role(m) != "system").count()
 }
 
 /// Fingerprint identifying a conversation: its first message.
@@ -173,7 +201,7 @@ pub fn conversation_fingerprint(messages: &[Value]) -> String {
 pub fn sanitize_messages(messages: Vec<Value>) -> Vec<Value> {
     // 1. merge same-role neighbours, normalise content to block arrays.
     let mut merged: Vec<Value> = Vec::new();
-    for m in messages {
+    for m in inline_system_messages(messages) {
         let r = role(&m).to_string();
         if r != "user" && r != "assistant" {
             continue;
@@ -182,19 +210,21 @@ pub fn sanitize_messages(messages: Vec<Value>) -> Vec<Value> {
             .into_iter()
             .filter(|b| {
                 !(b.get("type").and_then(Value::as_str) == Some("text")
-                    && b.get("text").and_then(Value::as_str).map(|t| t.trim().is_empty()).unwrap_or(true))
+                    && b.get("text")
+                        .and_then(Value::as_str)
+                        .map(|t| t.trim().is_empty())
+                        .unwrap_or(true))
             })
             .collect();
         if bl.is_empty() {
             continue;
         }
-        if let Some(last) = merged.last_mut() {
-            if role(last) == r {
-                if let Some(arr) = last.get_mut("content").and_then(Value::as_array_mut) {
-                    arr.extend(bl);
-                    continue;
-                }
-            }
+        if let Some(last) = merged.last_mut()
+            && role(last) == r
+            && let Some(arr) = last.get_mut("content").and_then(Value::as_array_mut)
+        {
+            arr.extend(bl);
+            continue;
         }
         merged.push(json!({"role": r, "content": bl}));
     }
@@ -212,7 +242,10 @@ pub fn sanitize_messages(messages: Vec<Value>) -> Vec<Value> {
                 .collect();
             out.push(msg);
             if !ids.is_empty() {
-                let next_is_user = merged.get(i + 1).map(|m| role(m) == "user").unwrap_or(false);
+                let next_is_user = merged
+                    .get(i + 1)
+                    .map(|m| role(m) == "user")
+                    .unwrap_or(false);
                 let mut next = if next_is_user {
                     i += 1;
                     merged[i].clone()
@@ -222,7 +255,11 @@ pub fn sanitize_messages(messages: Vec<Value>) -> Vec<Value> {
                 let present: HashSet<String> = blocks(&next)
                     .iter()
                     .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-                    .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str).map(str::to_string))
+                    .filter_map(|b| {
+                        b.get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
                     .collect();
                 let mut results: Vec<Value> = Vec::new();
                 let mut rest: Vec<Value> = Vec::new();
@@ -277,21 +314,49 @@ pub fn sanitize_messages(messages: Vec<Value>) -> Vec<Value> {
     // 3. merge again (step 2 may have created neighbours) and fix the start.
     let mut final_msgs: Vec<Value> = Vec::with_capacity(out.len());
     for m in out {
-        if let Some(last) = final_msgs.last_mut() {
-            if role(last) == role(&m) {
-                let extra = blocks(&m);
-                if let Some(arr) = last.get_mut("content").and_then(Value::as_array_mut) {
-                    arr.extend(extra);
-                }
-                continue;
+        if let Some(last) = final_msgs.last_mut()
+            && role(last) == role(&m)
+        {
+            let extra = blocks(&m);
+            if let Some(arr) = last.get_mut("content").and_then(Value::as_array_mut) {
+                arr.extend(extra);
             }
+            continue;
         }
         final_msgs.push(m);
     }
-    if final_msgs.first().map(|m| role(m) != "user").unwrap_or(false) {
+    if final_msgs
+        .first()
+        .map(|m| role(m) != "user")
+        .unwrap_or(false)
+    {
         final_msgs.insert(0, json!({"role": "user", "content": [{"type": "text", "text": "(continuing an earlier conversation)"}]}));
     }
     final_msgs
+}
+
+/// Claude Code sends mid-conversation `role: "system"` messages (an Anthropic
+/// beta). Providers that don't support them get the text as a
+/// `<system-reminder>` block in a user message instead.
+pub fn inline_system_messages(messages: Vec<Value>) -> Vec<Value> {
+    messages
+        .into_iter()
+        .map(|m| {
+            if role(&m) != "system" {
+                return m;
+            }
+            let text: Vec<String> = blocks(&m)
+                .iter()
+                .filter_map(|b| b.get("text").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            json!({"role": "user", "content": [{"type": "text", "text": format!("<system-reminder>\n{}\n</system-reminder>", text.join("\n"))}]})
+        })
+        .collect()
+}
+
+/// The last message that isn't a mid-conversation system message.
+pub fn last_turn(messages: &[Value]) -> Option<&Value> {
+    messages.iter().rev().find(|m| role(m) != "system")
 }
 
 fn orphan_result_as_text(b: &Value) -> Value {
@@ -325,7 +390,9 @@ impl Accumulator {
             }
             "content_block_delta" => {
                 let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                let Some(block) = self.blocks.get_mut(idx) else { return };
+                let Some(block) = self.blocks.get_mut(idx) else {
+                    return;
+                };
                 let d = ev.get("delta").cloned().unwrap_or(json!({}));
                 match d.get("type").and_then(Value::as_str).unwrap_or("") {
                     "text_delta" => append(block, "text", d.get("text")),
@@ -337,13 +404,14 @@ impl Accumulator {
                         }
                     }
                     "citations_delta" => {
-                        if let Some(c) = d.get("citation") {
-                            if let Some(obj) = block.as_object_mut() {
-                                obj.entry("citations")
-                                    .or_insert_with(|| json!([]))
-                                    .as_array_mut()
-                                    .map(|a| a.push(c.clone()));
-                            }
+                        if let Some(c) = d.get("citation")
+                            && let Some(obj) = block.as_object_mut()
+                            && let Some(a) = obj
+                                .entry("citations")
+                                .or_insert_with(|| json!([]))
+                                .as_array_mut()
+                        {
+                            a.push(c.clone())
                         }
                     }
                     _ => {}
@@ -351,10 +419,11 @@ impl Accumulator {
             }
             "content_block_stop" => {
                 let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                if let (Some(block), Some(pj)) = (self.blocks.get_mut(idx), self.partial_json.get(idx)) {
-                    if !pj.is_empty() {
-                        block["input"] = serde_json::from_str(pj).unwrap_or_else(|_| json!({}));
-                    }
+                if let (Some(block), Some(pj)) =
+                    (self.blocks.get_mut(idx), self.partial_json.get(idx))
+                    && !pj.is_empty()
+                {
+                    block["input"] = serde_json::from_str(pj).unwrap_or_else(|_| json!({}));
                 }
             }
             "message_delta" => {
@@ -397,8 +466,14 @@ impl Accumulator {
 }
 
 fn append(block: &mut Value, key: &str, s: Option<&Value>) {
-    let Some(s) = s.and_then(Value::as_str) else { return };
-    let cur = block.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let Some(s) = s.and_then(Value::as_str) else {
+        return;
+    };
+    let cur = block
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     block[key] = Value::String(cur + s);
 }
 
@@ -407,7 +482,10 @@ fn append(block: &mut Value, key: &str, s: Option<&Value>) {
 pub fn is_content_event(ev: &Value) -> bool {
     matches!(
         ev.get("type").and_then(Value::as_str),
-        Some("content_block_start") | Some("content_block_delta") | Some("message_delta") | Some("message_stop")
+        Some("content_block_start")
+            | Some("content_block_delta")
+            | Some("message_delta")
+            | Some("message_stop")
     )
 }
 
@@ -440,6 +518,27 @@ mod tests {
         assert_eq!(last[1]["type"], "text");
         assert!(last[2]["text"].as_str().unwrap().contains("orphan"));
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn sanitize_inlines_system_messages() {
+        let msgs = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"system","content":[{"type":"text","text":"env info"}]}),
+        ];
+        let out = sanitize_messages(msgs);
+        assert_eq!(out.len(), 1);
+        assert!(
+            blocks(&out[0])[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("<system-reminder>\nenv info")
+        );
+        let msgs = vec![
+            json!({"role":"user","content":"a"}),
+            json!({"role":"system","content":"b"}),
+        ];
+        assert_eq!(role(last_turn(&msgs).unwrap()), "user");
     }
 
     #[test]

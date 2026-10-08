@@ -20,7 +20,9 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use crate::canonical::{blocks, estimate_tokens, prefix_hash, role, tool_result_text};
+use crate::canonical::{
+    blocks, estimate_tokens, prefix_hash, role, tool_result_text, turn_count, turn_cut_index,
+};
 use crate::config::CompactionConfig;
 use crate::state::{Checkpoint, now_ts, truncate};
 
@@ -51,7 +53,7 @@ pub fn summary_message(summary: &str) -> Value {
             "type": "text",
             "text": format!(
                 "{SUMMARY_OPEN}\nThe earlier part of this conversation was compacted (the session was moved to a different model). \
-This summary replaces those earlier messages:\n\n{summary}\n{SUMMARY_CLOSE}\n\nContinue the work from where it left off; the most recent messages follow."
+    This summary replaces those earlier messages:\n\n{summary}\n{SUMMARY_CLOSE}\n\nContinue the work from where it left off; the most recent messages follow."
             )
         }]
     })
@@ -72,17 +74,28 @@ fn existing_summary(msg: &Value) -> Option<String> {
 
 /// Replace the checkpointed prefix of `original` with its summary, if the
 /// checkpoint matches this conversation.
+///
+/// `ck.covered` counts user/assistant turns, so mid-conversation system
+/// messages (which harnesses add and regenerate) never break the match; any
+/// inside the covered prefix are dropped along with it.
 pub fn apply_checkpoint(original: &[Value], ck: &Checkpoint) -> Option<Vec<Value>> {
-    if original.len() <= ck.covered {
+    let cut = checkpoint_cut(original, ck)?;
+    let mut out = Vec::with_capacity(original.len() - cut + 1);
+    out.push(summary_message(&ck.summary));
+    out.extend_from_slice(&original[cut..]);
+    Some(out)
+}
+
+/// Raw index in `original` where the checkpoint's covered prefix ends, if the
+/// checkpoint matches and something remains after it.
+pub fn checkpoint_cut(original: &[Value], ck: &Checkpoint) -> Option<usize> {
+    if turn_count(original) <= ck.covered {
         return None;
     }
     if prefix_hash(original, ck.covered) != ck.prefix_hash {
         return None;
     }
-    let mut out = Vec::with_capacity(original.len() - ck.covered + 1);
-    out.push(summary_message(&ck.summary));
-    out.extend_from_slice(&original[ck.covered..]);
-    Some(out)
+    turn_cut_index(original, ck.covered)
 }
 
 /// Where to cut. `working` is the list that would be sent (possibly already
@@ -90,8 +103,9 @@ pub fn apply_checkpoint(original: &[Value], ck: &Checkpoint) -> Option<Vec<Value
 /// summarized and `working[b..]` (which starts with an assistant message) is
 /// kept verbatim.
 pub fn choose_boundary(working: &[Value], cfg: &CompactionConfig) -> Option<usize> {
-    let candidates: Vec<usize> =
-        (1..working.len()).filter(|&i| role(&working[i]) == "assistant").collect();
+    let candidates: Vec<usize> = (1..working.len())
+        .filter(|&i| role(&working[i]) == "assistant")
+        .collect();
     if candidates.is_empty() {
         return None;
     }
@@ -119,11 +133,11 @@ pub fn render_transcript(msgs: &[Value], cfg: &CompactionConfig) -> (Option<Stri
     let mut names: HashMap<String, String> = HashMap::new();
     let mut entries = Vec::new();
     for (i, m) in msgs.iter().enumerate() {
-        if i == 0 {
-            if let Some(s) = existing_summary(m) {
-                previous = Some(s);
-                continue;
-            }
+        if i == 0
+            && let Some(s) = existing_summary(m)
+        {
+            previous = Some(s);
+            continue;
         }
         let mut out = String::new();
         let r = role(m);
@@ -146,7 +160,11 @@ pub fn render_transcript(msgs: &[Value], cfg: &CompactionConfig) -> (Option<Stri
                 "tool_result" => {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                     let name = names.get(id).cloned().unwrap_or_else(|| "tool".into());
-                    let err = if b.get("is_error").and_then(Value::as_bool) == Some(true) { " (error)" } else { "" };
+                    let err = if b.get("is_error").and_then(Value::as_bool) == Some(true) {
+                        " (error)"
+                    } else {
+                        ""
+                    };
                     out.push_str(&format!(
                         "[TOOL RESULT {name}{err}]\n{}\n",
                         head_tail(&tool_result_text(&b), cfg.tool_result_max_chars)
@@ -171,7 +189,11 @@ pub fn head_tail(s: &str, max: usize) -> String {
     let half = max / 2;
     let head = &s[..s.floor_char_boundary(half)];
     let tail_start = s.ceil_char_boundary(s.len() - half);
-    format!("{head}\n…[{} chars omitted]…\n{}", s.len() - max, &s[tail_start..])
+    format!(
+        "{head}\n…[{} chars omitted]…\n{}",
+        s.len() - max,
+        &s[tail_start..]
+    )
 }
 
 /// Split transcript entries into chunks of at most `max_tokens`.
@@ -180,7 +202,11 @@ pub fn chunk_entries(entries: &[String], max_tokens: u64) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut cur = String::new();
     for e in entries {
-        let e = if e.len() > max_chars { head_tail(e, max_chars) } else { e.clone() };
+        let e = if e.len() > max_chars {
+            head_tail(e, max_chars)
+        } else {
+            e.clone()
+        };
         if !cur.is_empty() && cur.len() + e.len() > max_chars {
             chunks.push(std::mem::take(&mut cur));
         }
@@ -200,7 +226,9 @@ pub fn chunk_prompt(previous: Option<&str>, chunk: &str, part: usize, total: usi
         p.push_str("Summary of the conversation so far:\n<previous-summary>\n");
         p.push_str(prev);
         p.push_str("\n</previous-summary>\n\n");
-        p.push_str("Update that summary to also cover the following later part of the conversation");
+        p.push_str(
+            "Update that summary to also cover the following later part of the conversation",
+        );
     } else {
         p.push_str("Summarize the following conversation");
     }
@@ -214,11 +242,48 @@ pub fn chunk_prompt(previous: Option<&str>, chunk: &str, part: usize, total: usi
     p
 }
 
+/// The most recent thing the user actually typed in `msgs` (ignoring tool
+/// results and harness-injected `<system-reminder>` blocks).
+pub fn latest_user_request(msgs: &[Value]) -> Option<String> {
+    msgs.iter()
+        .rev()
+        .filter(|m| role(m) == "user")
+        .find_map(|m| {
+            let texts: Vec<String> = blocks(m)
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|t| {
+                    !t.is_empty()
+                        && !t.starts_with("<system-reminder>")
+                        && !t.contains(SUMMARY_OPEN)
+                })
+                .map(str::to_string)
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        })
+}
+
+/// Append the user's latest request verbatim when compaction swallowed it,
+/// so the next model sees the exact instruction it is working on.
+pub fn with_latest_request(summary: String, head: &[Value], tail: &[Value]) -> String {
+    if latest_user_request(tail).is_some() {
+        return summary;
+    }
+    match latest_user_request(head) {
+        Some(req) => format!(
+            "{summary}\n\nThe user's most recent request (verbatim):\n{}",
+            head_tail(&req, 6_000)
+        ),
+        None => summary,
+    }
+}
+
 /// Deterministic summary used when no summarizer model is reachable.
 pub fn fallback_summary(previous: Option<&str>, msgs: &[Value]) -> String {
-    let mut out = String::from(
-        "(Extractive summary generated without a model; details may be missing.)\n\n",
-    );
+    let mut out =
+        String::from("(Extractive summary generated without a model; details may be missing.)\n\n");
     if let Some(prev) = previous {
         out.push_str("Earlier summary:\n");
         out.push_str(&head_tail(prev, 8_000));
@@ -232,19 +297,33 @@ pub fn fallback_summary(previous: Option<&str>, msgs: &[Value]) -> String {
         for b in blocks(m) {
             match (role(m), b.get("type").and_then(Value::as_str).unwrap_or("")) {
                 ("user", "text") => {
-                    let t = b.get("text").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                    let t = b
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !t.is_empty() && !t.contains(SUMMARY_OPEN) {
                         users.push(truncate(&t, 600));
                     }
                 }
                 ("assistant", "text") => {
-                    let t = b.get("text").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                    let t = b
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !t.is_empty() {
                         last_assistant.push(truncate(&t, 800));
                     }
                 }
                 ("assistant", "tool_use") => {
-                    let name = b.get("name").and_then(Value::as_str).unwrap_or("?").to_string();
+                    let name = b
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string();
                     match tool_counts.iter_mut().find(|(n, _)| *n == name) {
                         Some((_, c)) => *c += 1,
                         None => tool_counts.push((name.clone(), 1)),
@@ -259,7 +338,11 @@ pub fn fallback_summary(previous: Option<&str>, msgs: &[Value]) -> String {
     if !users.is_empty() {
         out.push_str("User messages:\n");
         let keep: Vec<&String> = if users.len() > 30 {
-            users.iter().take(10).chain(users.iter().skip(users.len() - 20)).collect()
+            users
+                .iter()
+                .take(10)
+                .chain(users.iter().skip(users.len() - 20))
+                .collect()
         } else {
             users.iter().collect()
         };
@@ -271,7 +354,11 @@ pub fn fallback_summary(previous: Option<&str>, msgs: &[Value]) -> String {
     if !tool_counts.is_empty() {
         out.push_str("Tool usage: ");
         out.push_str(
-            &tool_counts.iter().map(|(n, c)| format!("{n}×{c}")).collect::<Vec<_>>().join(", "),
+            &tool_counts
+                .iter()
+                .map(|(n, c)| format!("{n}×{c}"))
+                .collect::<Vec<_>>()
+                .join(", "),
         );
         out.push_str("\nMost recent tool calls:\n");
         for c in recent_calls.iter().rev().take(20).rev() {
@@ -289,20 +376,21 @@ pub fn fallback_summary(previous: Option<&str>, msgs: &[Value]) -> String {
 }
 
 /// Turn a summary over `working[..b]` into a checkpoint over the *original*
-/// message list. `offset` is how many original messages `working[0]` stood
-/// for when `working` already began with an older summary.
+/// message list. `previous_cut` is the raw index in `original` where the
+/// older checkpoint ended when `working` already began with its summary.
 pub fn make_checkpoint(
     original: &[Value],
     b_in_working: usize,
-    previous_covered: Option<usize>,
+    previous_cut: Option<usize>,
     summary: String,
     by_account: &str,
     method: String,
 ) -> Checkpoint {
-    let covered = match previous_covered {
+    let raw_cut = match previous_cut {
         Some(c) => c + b_in_working - 1,
         None => b_in_working,
     };
+    let covered = turn_count(&original[..raw_cut.min(original.len())]);
     Checkpoint {
         covered,
         prefix_hash: prefix_hash(original, covered),
@@ -328,7 +416,10 @@ mod tests {
 
     #[test]
     fn boundary_and_checkpoint_roundtrip() {
-        let cfg = CompactionConfig { keep_recent_tokens: 3000, ..Default::default() };
+        let cfg = CompactionConfig {
+            keep_recent_tokens: 3000,
+            ..Default::default()
+        };
         let original = conv(20, 4000);
         let b = choose_boundary(&original, &cfg).unwrap();
         assert_eq!(role(&original[b]), "assistant");
@@ -345,9 +436,19 @@ mod tests {
 
         // A second compaction on top of the first maps back to original indices.
         let working = apply_checkpoint(&grown, &ck).unwrap();
-        let cfg2 = CompactionConfig { keep_recent_tokens: 100, ..Default::default() };
+        let cfg2 = CompactionConfig {
+            keep_recent_tokens: 100,
+            ..Default::default()
+        };
         if let Some(b2) = choose_boundary(&working, &cfg2) {
-            let ck2 = make_checkpoint(&grown, b2, Some(ck.covered), "S2".into(), "b", "test".into());
+            let ck2 = make_checkpoint(
+                &grown,
+                b2,
+                checkpoint_cut(&grown, &ck),
+                "S2".into(),
+                "b",
+                "test".into(),
+            );
             let rw2 = apply_checkpoint(&grown, &ck2).unwrap();
             assert_eq!(rw2[1], working[b2]);
         }
@@ -356,6 +457,45 @@ mod tests {
         let mut other = conv(25, 10);
         other[0] = json!({"role":"user","content":"a different task"});
         assert!(apply_checkpoint(&other, &ck).is_none());
+    }
+
+    #[test]
+    fn system_messages_do_not_break_checkpoints() {
+        let cfg = CompactionConfig {
+            keep_recent_tokens: 3000,
+            ..Default::default()
+        };
+        let mut original = conv(20, 4000);
+        original.insert(3, json!({"role":"system","content":"reminder v1"}));
+        let b = choose_boundary(&original, &cfg).unwrap();
+        let ck = make_checkpoint(&original, b, None, "S".into(), "a", "t".into());
+        // Next turn: the old system message is gone, a new one is appended.
+        let mut next: Vec<Value> = original
+            .iter()
+            .filter(|m| role(m) != "system")
+            .cloned()
+            .collect();
+        next.push(json!({"role":"system","content":"reminder v2"}));
+        let rw = apply_checkpoint(&next, &ck).expect("still matches");
+        assert_eq!(rw[1], original[b]);
+        assert_eq!(rw.last().unwrap()["content"], "reminder v2");
+    }
+
+    #[test]
+    fn latest_request_is_kept_verbatim() {
+        let head = vec![
+            json!({"role":"user","content":[{"type":"text","text":"<system-reminder>x</system-reminder>"},{"type":"text","text":"fix the bug in parser.rs"}]}),
+            json!({"role":"assistant","content":"ok"}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"data"}]}),
+        ];
+        let tail = vec![json!({"role":"assistant","content":"working"})];
+        let s = with_latest_request("SUM".into(), &head, &tail);
+        assert!(s.ends_with("fix the bug in parser.rs"), "{s}");
+        let tail2 = vec![
+            json!({"role":"assistant","content":"a"}),
+            json!({"role":"user","content":"new ask"}),
+        ];
+        assert_eq!(with_latest_request("SUM".into(), &head, &tail2), "SUM");
     }
 
     #[test]

@@ -17,10 +17,16 @@ pub fn error_json(kind: &str, message: &str) -> Value {
     json!({"type": "error", "error": {"type": kind, "message": message}})
 }
 
-fn error_response(status: StatusCode, kind: &str, message: &str, retry_after: Option<u64>) -> Response {
+fn error_response(
+    status: StatusCode,
+    kind: &str,
+    message: &str,
+    retry_after: Option<u64>,
+) -> Response {
     let mut resp = (status, axum::Json(error_json(kind, message))).into_response();
     if let Some(s) = retry_after {
-        resp.headers_mut().insert("retry-after", HeaderValue::from(s));
+        resp.headers_mut()
+            .insert("retry-after", HeaderValue::from(s));
     }
     resp
 }
@@ -42,10 +48,10 @@ pub fn session_id(headers: &HeaderMap, body: &Value) -> Option<String> {
         return Some(s);
     }
     let uid = body.pointer("/metadata/user_id")?.as_str()?;
-    if let Ok(v) = serde_json::from_str::<Value>(uid) {
-        if let Some(s) = v.get("session_id").and_then(Value::as_str) {
-            return Some(s.to_string());
-        }
+    if let Ok(v) = serde_json::from_str::<Value>(uid)
+        && let Some(s) = v.get("session_id").and_then(Value::as_str)
+    {
+        return Some(s.to_string());
     }
     if let Some(pos) = uid.find("_session_") {
         return Some(uid[pos + 9..].to_string());
@@ -53,32 +59,65 @@ pub fn session_id(headers: &HeaderMap, body: &Value) -> Option<String> {
     Some(uid.to_string())
 }
 
-pub async fn messages(State(app): State<AppState>, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+pub async fn messages(
+    State(app): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if !app.authorized(&headers) {
-        return error_response(StatusCode::UNAUTHORIZED, "authentication_error", "invalid model-roulette api key", None);
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid model-roulette api key",
+            None,
+        );
     }
     let req = match parse_body(&headers, &body) {
         Ok(v) => v,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", &e, None),
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", &e, None);
+        }
     };
-    let model = req.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+    let model = req
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let lane = match app.route_model(&model) {
         ModelRoute::Lane(l) => l,
         ModelRoute::Passthrough => return passthrough(&app, &uri, headers, body).await,
         ModelRoute::Reject => {
-            return error_response(StatusCode::NOT_FOUND, "not_found_error", &format!("unknown model '{model}'"), None);
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "not_found_error",
+                &format!("unknown model '{model}'"),
+                None,
+            );
         }
     };
     let stream = req.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let session = session_id(&headers, &req);
-    let rr = RouteRequest { request: req, session, lane, headers: headers.clone(), converted: false };
+    let rr = RouteRequest {
+        request: req,
+        session,
+        lane,
+        headers: headers.clone(),
+        converted: false,
+    };
     let routed = match app.roulette.dispatch(rr).await {
         Ok(r) => r,
         Err(e) => return route_error_response(&e),
     };
     let mut extra = HeaderMap::new();
-    extra.insert("x-model-roulette-account", HeaderValue::from_str(&routed.account).unwrap_or(HeaderValue::from_static("?")));
-    extra.insert("x-model-roulette-model", HeaderValue::from_str(&routed.model).unwrap_or(HeaderValue::from_static("?")));
+    extra.insert(
+        "x-model-roulette-account",
+        HeaderValue::from_str(&routed.account).unwrap_or(HeaderValue::from_static("?")),
+    );
+    extra.insert(
+        "x-model-roulette-model",
+        HeaderValue::from_str(&routed.model).unwrap_or(HeaderValue::from_static("?")),
+    );
 
     if stream {
         let events = routed.events;
@@ -104,7 +143,10 @@ pub async fn messages(State(app): State<AppState>, uri: Uri, headers: HeaderMap,
         };
         let mut resp = Response::new(Body::from_stream(body));
         let h = resp.headers_mut();
-        h.insert("content-type", HeaderValue::from_static("text/event-stream"));
+        h.insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream"),
+        );
         h.insert("cache-control", HeaderValue::from_static("no-cache"));
         h.extend(extra);
         return resp;
@@ -125,10 +167,17 @@ pub async fn messages(State(app): State<AppState>, uri: Uri, headers: HeaderMap,
     resp
 }
 
-pub async fn count_tokens(State(app): State<AppState>, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+pub async fn count_tokens(
+    State(app): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let req = match parse_body(&headers, &body) {
         Ok(v) => v,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", &e, None),
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", &e, None);
+        }
     };
     let model = req.get("model").and_then(Value::as_str).unwrap_or("");
     if matches!(app.route_model(model), ModelRoute::Passthrough) {
@@ -141,13 +190,24 @@ pub async fn count_tokens(State(app): State<AppState>, uri: Uri, headers: Header
 /// api.anthropic.com) using the client's own credentials. Lets Claude Code be
 /// pointed at the proxy permanently while regular models keep working.
 pub async fn passthrough(app: &AppState, uri: &Uri, headers: HeaderMap, body: Bytes) -> Response {
-    let base = app.roulette.cfg.server.passthrough_base_url.trim_end_matches('/');
-    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path());
+    let base = app
+        .roulette
+        .cfg
+        .server
+        .passthrough_base_url
+        .trim_end_matches('/');
+    let path = uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or(uri.path());
     let url = format!("{base}{path}");
     let mut req = app.roulette.http.post(&url).body(body);
     for (k, v) in headers.iter() {
         let name = k.as_str();
-        if matches!(name, "host" | "content-length" | "connection" | "accept-encoding" | "transfer-encoding") {
+        if matches!(
+            name,
+            "host" | "content-length" | "connection" | "accept-encoding" | "transfer-encoding"
+        ) {
             continue;
         }
         req = req.header(k, v);
@@ -155,13 +215,21 @@ pub async fn passthrough(app: &AppState, uri: &Uri, headers: HeaderMap, body: By
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            return error_response(StatusCode::BAD_GATEWAY, "api_error", &format!("passthrough failed: {e}"), None);
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                &format!("passthrough failed: {e}"),
+                None,
+            );
         }
     };
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut out_headers = HeaderMap::new();
     for (k, v) in resp.headers().iter() {
-        if matches!(k.as_str(), "content-length" | "transfer-encoding" | "connection" | "content-encoding") {
+        if matches!(
+            k.as_str(),
+            "content-length" | "transfer-encoding" | "connection" | "content-encoding"
+        ) {
             continue;
         }
         out_headers.insert(k.clone(), v.clone());

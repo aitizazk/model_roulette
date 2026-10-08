@@ -10,8 +10,8 @@ use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
 use crate::canonical::{
-    Accumulator, conversation_fingerprint, estimate_request_tokens, estimate_tokens, is_content_event,
-    sanitize_messages,
+    Accumulator, conversation_fingerprint, estimate_request_tokens, estimate_tokens,
+    is_content_event, sanitize_messages,
 };
 use crate::compaction;
 use crate::config::Config;
@@ -49,7 +49,10 @@ pub struct Routed {
 #[derive(Debug)]
 pub enum RouteError {
     /// Every account is cooling down (or failed for this request).
-    Exhausted { retry_after: Option<Duration>, last: Option<UpstreamFailure> },
+    Exhausted {
+        retry_after: Option<Duration>,
+        last: Option<UpstreamFailure>,
+    },
     /// A non-retryable upstream error (bad request) to report to the client.
     Upstream(UpstreamFailure),
     NoAccounts,
@@ -59,7 +62,10 @@ impl std::fmt::Display for RouteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RouteError::Exhausted { retry_after, last } => {
-                write!(f, "all model-roulette accounts are rate limited or unavailable")?;
+                write!(
+                    f,
+                    "all model-roulette accounts are rate limited or unavailable"
+                )?;
                 if let Some(d) = retry_after {
                     write!(f, "; next one frees up in {}s", d.as_secs())?;
                 }
@@ -85,10 +91,20 @@ impl Roulette {
     pub fn new(cfg: Config, store: Arc<StateStore>) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(cfg.rotation.request_timeout_secs))
+            .read_timeout(Duration::from_secs(cfg.rotation.request_timeout_secs))
             .build()?;
-        let accounts = cfg.accounts.iter().cloned().map(Account::from_config).collect();
-        Ok(Self { cfg: Arc::new(cfg), accounts, store, http })
+        let accounts = cfg
+            .accounts
+            .iter()
+            .cloned()
+            .map(Account::from_config)
+            .collect();
+        Ok(Self {
+            cfg: Arc::new(cfg),
+            accounts,
+            store,
+            http,
+        })
     }
 
     pub fn usable(&self, a: &Account) -> bool {
@@ -118,9 +134,9 @@ impl Roulette {
             .and_then(|c| self.accounts.iter().position(|a| a.id() == c))
             .unwrap_or(0);
         let now = now_ts();
-        (0..n)
-            .map(|i| &self.accounts[(start + i) % n])
-            .find(|a| self.usable(a) && !tried.contains(a.id()) && self.store.is_available(a.id(), now))
+        (0..n).map(|i| &self.accounts[(start + i) % n]).find(|a| {
+            self.usable(a) && !tried.contains(a.id()) && self.store.is_available(a.id(), now)
+        })
     }
 
     /// Seconds until the first usable account comes off cooldown.
@@ -130,7 +146,12 @@ impl Roulette {
         self.accounts
             .iter()
             .filter(|a| self.usable(a))
-            .map(|a| st.accounts.get(a.id()).and_then(|s| s.cooldown_until).unwrap_or(now))
+            .map(|a| {
+                st.accounts
+                    .get(a.id())
+                    .and_then(|s| s.cooldown_until)
+                    .unwrap_or(now)
+            })
             .min()
             .map(|t| Duration::from_secs((t - now).max(0) as u64))
     }
@@ -141,9 +162,15 @@ impl Roulette {
         let d = match f.kind {
             FailureKind::RateLimited => f.retry_after.unwrap_or_else(|| {
                 let factor = 2u64.saturating_pow(consecutive.min(16));
-                Duration::from_secs(r.rate_limit_cooldown_secs.saturating_mul(factor).min(r.max_backoff_secs))
+                Duration::from_secs(
+                    r.rate_limit_cooldown_secs
+                        .saturating_mul(factor)
+                        .min(r.max_backoff_secs),
+                )
             }),
-            FailureKind::QuotaExhausted => f.retry_after.unwrap_or(Duration::from_secs(r.quota_cooldown_secs)),
+            FailureKind::QuotaExhausted => f
+                .retry_after
+                .unwrap_or(Duration::from_secs(r.quota_cooldown_secs)),
             FailureKind::AccountError => Duration::from_secs(r.auth_cooldown_secs),
             FailureKind::Transient => f
                 .retry_after
@@ -165,7 +192,11 @@ impl Roulette {
     // ---- session bookkeeping --------------------------------------------
 
     fn session_account(&self, key: &str) -> Option<String> {
-        self.store.lock().sessions.get(key).and_then(|s| s.account.clone())
+        self.store
+            .lock()
+            .sessions
+            .get(key)
+            .and_then(|s| s.account.clone())
     }
 
     fn checkpoint(&self, key: &str, fp: &str) -> Option<Checkpoint> {
@@ -212,8 +243,12 @@ impl Roulette {
         if !self.accounts.iter().any(|a| self.usable(a)) {
             return Err(RouteError::NoAccounts);
         }
-        let original: Vec<Value> =
-            rr.request.get("messages").and_then(Value::as_array).cloned().unwrap_or_default();
+        let original: Vec<Value> = rr
+            .request
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let fp = conversation_fingerprint(&original);
         let skey = rr.session.clone().unwrap_or_else(|| format!("conv:{fp}"));
         let current = match rr.lane {
@@ -234,15 +269,19 @@ impl Roulette {
         loop {
             let Some(acct) = self.select(current.as_deref(), &tried) else {
                 let wait = self.earliest_recovery();
-                if let Some(w) = wait {
-                    if now_ts() + w.as_secs() as i64 <= deadline && self.cfg.rotation.max_wait_secs > 0 {
-                        tracing::info!("all accounts cooling down; waiting {}s", w.as_secs());
-                        tokio::time::sleep(w + Duration::from_millis(200)).await;
-                        tried.clear();
-                        continue;
-                    }
+                if let Some(w) = wait
+                    && now_ts() + w.as_secs() as i64 <= deadline
+                    && self.cfg.rotation.max_wait_secs > 0
+                {
+                    tracing::info!("all accounts cooling down; waiting {}s", w.as_secs());
+                    tokio::time::sleep(w + Duration::from_millis(200)).await;
+                    tried.clear();
+                    continue;
                 }
-                return Err(RouteError::Exhausted { retry_after: wait, last });
+                return Err(RouteError::Exhausted {
+                    retry_after: wait,
+                    last,
+                });
             };
             let model = match rr.lane {
                 Lane::Main => acct.cfg.model().to_string(),
@@ -269,23 +308,25 @@ impl Roulette {
                 }
                 let switching = current.as_deref().map(|c| c != acct.id()).unwrap_or(false);
                 let est = estimate_tokens(&Value::Array(msgs.clone())) + overhead;
-                let window_limit = (acct.cfg.context_window() as f64 * self.cfg.compaction.proactive_ratio) as u64;
+                let window_limit =
+                    (acct.cfg.context_window() as f64 * self.cfg.compaction.proactive_ratio) as u64;
                 let need = self.cfg.compaction.enabled
-                    && ((switching && est >= self.cfg.compaction.trigger_tokens) || est > window_limit || force_compact);
-                if need {
-                    if let Some(new_ck) = self.compact(&original, &msgs, ck.as_ref(), acct).await {
-                        if let Some(rw) = compaction::apply_checkpoint(&original, &new_ck) {
-                            let after = estimate_tokens(&Value::Array(rw.clone())) + overhead;
-                            tracing::info!(
-                                session = %skey, to = acct.id(), covered = new_ck.covered, method = %new_ck.method,
-                                before = est, after, "compacted conversation"
-                            );
-                            msgs = rw;
-                            rewritten = true;
-                            compacted = true;
-                            self.set_checkpoint(&skey, &fp, Some(new_ck));
-                        }
-                    }
+                    && ((switching && est >= self.cfg.compaction.trigger_tokens)
+                        || est > window_limit
+                        || force_compact);
+                if need
+                    && let Some(new_ck) = self.compact(&original, &msgs, ck.as_ref(), acct).await
+                    && let Some(rw) = compaction::apply_checkpoint(&original, &new_ck)
+                {
+                    let after = estimate_tokens(&Value::Array(rw.clone())) + overhead;
+                    tracing::info!(
+                        session = %skey, to = acct.id(), covered = new_ck.covered, method = %new_ck.method,
+                        before = est, after, "compacted conversation"
+                    );
+                    msgs = rw;
+                    rewritten = true;
+                    compacted = true;
+                    self.set_checkpoint(&skey, &fp, Some(new_ck));
                 }
             }
             if rewritten || rr.converted {
@@ -295,7 +336,12 @@ impl Roulette {
             request["messages"] = Value::Array(msgs);
 
             tracing::debug!(account = acct.id(), model = %model, "sending upstream");
-            let call = Call { account: acct, model: model.clone(), request, client_headers: &rr.headers };
+            let call = Call {
+                account: acct,
+                model: model.clone(),
+                request,
+                client_headers: &rr.headers,
+            };
             let result = match upstream::send(&self.http, &self.store, call).await {
                 Ok(resp) => peek(resp.events).await.map(|ev| (ev, resp.headers)),
                 Err(f) => Err(f),
@@ -303,11 +349,20 @@ impl Roulette {
             match result {
                 Ok((events, headers)) => {
                     self.store.record_success(acct.id());
-                    if self.cfg.rotation.preemptive {
-                        if let Some(d) = preemptive_cooldown(&headers) {
-                            tracing::info!(account = acct.id(), secs = d.as_secs(), "budget exhausted per headers; benching early");
-                            self.store.bench(acct.id(), FailureKind::RateLimited, now_ts() + d.as_secs() as i64, "remaining budget is 0");
-                        }
+                    if self.cfg.rotation.preemptive
+                        && let Some(d) = preemptive_cooldown(&headers)
+                    {
+                        tracing::info!(
+                            account = acct.id(),
+                            secs = d.as_secs(),
+                            "budget exhausted per headers; benching early"
+                        );
+                        self.store.bench(
+                            acct.id(),
+                            FailureKind::RateLimited,
+                            now_ts() + d.as_secs() as i64,
+                            "remaining budget is 0",
+                        );
                     }
                     if rr.lane == Lane::Main {
                         if current.as_deref().is_some_and(|c| c != acct.id()) {
@@ -351,7 +406,10 @@ impl Roulette {
         let me_cooldown = move |f: &UpstreamFailure| -> Option<i64> {
             let r = &cfg.rotation;
             let secs = match f.kind {
-                FailureKind::RateLimited => f.retry_after.map(|d| d.as_secs()).unwrap_or(r.rate_limit_cooldown_secs),
+                FailureKind::RateLimited => f
+                    .retry_after
+                    .map(|d| d.as_secs())
+                    .unwrap_or(r.rate_limit_cooldown_secs),
                 FailureKind::QuotaExhausted => r.quota_cooldown_secs,
                 FailureKind::AccountError => r.auth_cooldown_secs,
                 FailureKind::Transient => r.transient_cooldown_secs,
@@ -368,10 +426,15 @@ impl Roulette {
                         }
                     }
                     Some("content_block_start") => {
-                        if let Some(data) = ev.pointer("/content_block/data").and_then(Value::as_str) {
+                        if let Some(data) =
+                            ev.pointer("/content_block/data").and_then(Value::as_str)
+                        {
                             store.record_signature(data, &account);
                         }
-                        if let Some(sig) = ev.pointer("/content_block/signature").and_then(Value::as_str) {
+                        if let Some(sig) = ev
+                            .pointer("/content_block/signature")
+                            .and_then(Value::as_str)
+                        {
                             store.record_signature(sig, &account);
                         }
                     }
@@ -408,7 +471,12 @@ impl Roulette {
         for (i, chunk) in chunks.iter().enumerate() {
             let prompt = compaction::chunk_prompt(summary.as_deref(), chunk, i + 1, chunks.len());
             match self
-                .complete_text(compaction::SYSTEM_PROMPT, &prompt, self.cfg.compaction.summary_max_tokens, Some(target.id()))
+                .complete_text(
+                    compaction::SYSTEM_PROMPT,
+                    &prompt,
+                    self.cfg.compaction.summary_max_tokens,
+                    Some(target.id()),
+                )
                 .await
             {
                 Ok((text, who)) if !text.trim().is_empty() => {
@@ -421,17 +489,19 @@ impl Roulette {
                 }
             }
         }
-        let summary = if failed || summary.is_none() {
-            tracing::warn!("summarizer unavailable; using extractive fallback summary");
-            method = "fallback".into();
-            compaction::fallback_summary(previous.as_deref(), head)
-        } else {
-            summary.unwrap()
+        let summary = match summary {
+            Some(s) if !failed && !method.is_empty() => s,
+            _ => {
+                tracing::warn!("summarizer unavailable; using extractive fallback summary");
+                method = "fallback".into();
+                compaction::fallback_summary(previous.as_deref(), head)
+            }
         };
+        let summary = compaction::with_latest_request(summary, head, &working[b..]);
         Some(compaction::make_checkpoint(
             original,
             b,
-            existing.map(|c| c.covered),
+            existing.and_then(|c| compaction::checkpoint_cut(original, c)),
             summary,
             target.id(),
             method,
@@ -458,7 +528,10 @@ impl Roulette {
             order.extend(self.accounts.iter().filter(|a| Some(a.id()) != prefer));
         }
         let empty = HeaderMap::new();
-        let mut last = UpstreamFailure::new(FailureKind::Transient, "no account available for summarization");
+        let mut last = UpstreamFailure::new(
+            FailureKind::Transient,
+            "no account available for summarization",
+        );
         for acct in order {
             if !self.usable(acct) || !self.store.is_available(acct.id(), now_ts()) {
                 continue;
@@ -470,7 +543,12 @@ impl Roulette {
                 "system": system,
                 "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
             });
-            let call = Call { account: acct, model: model.clone(), request, client_headers: &empty };
+            let call = Call {
+                account: acct,
+                model: model.clone(),
+                request,
+                client_headers: &empty,
+            };
             let res = match upstream::send(&self.http, &self.store, call).await {
                 Ok(resp) => collect(resp.events).await,
                 Err(f) => Err(f),
@@ -527,7 +605,8 @@ impl Roulette {
                 })
             })
             .collect();
-        let mut sessions: Vec<(&String, &crate::state::SessionState)> = st.sessions.iter().collect();
+        let mut sessions: Vec<(&String, &crate::state::SessionState)> =
+            st.sessions.iter().collect();
         sessions.sort_by_key(|(_, s)| -s.last_used);
         let sessions: Vec<Value> = sessions
             .into_iter()
@@ -563,13 +642,18 @@ async fn peek(mut events: EventStream) -> Result<EventStream, UpstreamFailure> {
             Some(Err(f)) => return Err(f),
             None => {
                 if buf.is_empty() {
-                    return Err(UpstreamFailure::new(FailureKind::Transient, "upstream returned an empty stream"));
+                    return Err(UpstreamFailure::new(
+                        FailureKind::Transient,
+                        "upstream returned an empty stream",
+                    ));
                 }
                 break;
             }
         }
     }
-    Ok(Box::pin(futures::stream::iter(buf.into_iter().map(Ok)).chain(events)))
+    Ok(Box::pin(
+        futures::stream::iter(buf.into_iter().map(Ok)).chain(events),
+    ))
 }
 
 /// Collect a whole stream into a message.
